@@ -15,6 +15,15 @@ from easy_moe.wrapper import (
     replace_ffn_with_moe,
     collect_moe_aux_loss,
     reset_moe_aux_loss,
+    set_aux_loss_compute,
+    enable_gradient_checkpointing,
+)
+from easy_moe.perf import (
+    DataPrefetcher,
+    ThroughputLogger,
+    CUDAGraphCapturer,
+    get_linear_warmup_cosine_scheduler,
+    get_warmup_cosine_scheduler_for_muon,
 )
 
 __all__ = [
@@ -37,4 +46,11 @@ __all__ = [
     "replace_ffn_with_moe",
     "collect_moe_aux_loss",
     "reset_moe_aux_loss",
+    "set_aux_loss_compute",
+    "enable_gradient_checkpointing",
+    "DataPrefetcher",
+    "ThroughputLogger",
+    "CUDAGraphCapturer",
+    "get_linear_warmup_cosine_scheduler",
+    "get_warmup_cosine_scheduler_for_muon",
 ]

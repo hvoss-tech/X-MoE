@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+from typing import Optional
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from x_transformers import TransformerWrapper, Decoder, AutoregressiveWrapper
 from x_transformers.x_transformers import AttentionLayers
 
 from easy_moe.moe import MoEFFN
-from easy_moe.attention import HCA, CSA, DS4AttentionLayer, HybridAttentionBlock
+from easy_moe.attention import HybridAttentionBlock
 
 
 def replace_ffn_with_moe(
@@ -22,6 +24,7 @@ def replace_ffn_with_moe(
     dropout: float = 0.0,
     no_bias: bool = False,
     zero_init_output: bool = True,
+    batched_experts: bool = False,
 ) -> nn.Module:
     attn_layers = None
     if hasattr(model, "attn_layers"):
@@ -64,6 +67,7 @@ def replace_ffn_with_moe(
                 dropout=dropout,
                 no_bias=no_bias,
                 zero_init_output=zero_init_output,
+                batched_experts=batched_experts,
             )
             attn_layers.layers[idx][1] = moe
         ffn_count += 1
@@ -85,6 +89,21 @@ def reset_moe_aux_loss(model: nn.Module):
             module.reset_aux_loss()
 
 
+def set_aux_loss_compute(model: nn.Module, compute: bool):
+    for module in model.modules():
+        if isinstance(module, MoEFFN):
+            module._compute_aux_loss = compute
+
+
+def enable_gradient_checkpointing(model: nn.Module):
+    count = 0
+    for module in model.modules():
+        if isinstance(module, MoEFFN):
+            module._use_gradient_checkpointing = True
+            count += 1
+    return count
+
+
 class MoETransformerWrapper(nn.Module):
     def __init__(
         self,
@@ -96,14 +115,15 @@ class MoETransformerWrapper(nn.Module):
         load_balance_loss_weight: float = 0.01,
         z_loss_weight: float = 1e-4,
         moe_every_n_layers: int = 1,
-        moe_layers: list | None = None,
+   moe_layers: Optional[list] = None,
         glu: bool = True,
         mult: int = 4,
         dropout: float = 0.0,
         no_bias: bool = False,
         zero_init_output: bool = True,
-        model_config: dict | None = None,
-        ds4_attention: HybridAttentionBlock | None = None,
+        model_config: Optional[dict] = None,
+        ds4_attention: Optional[HybridAttentionBlock] = None,
+        batched_experts: bool = False,
     ):
         super().__init__()
 
@@ -122,12 +142,14 @@ class MoETransformerWrapper(nn.Module):
             dropout=dropout,
             no_bias=no_bias,
             zero_init_output=zero_init_output,
+            batched_experts=batched_experts,
         )
 
         self.num_experts = num_experts
         self.expert_top_k = expert_top_k
         self.routing_strategy = routing_strategy
         self.model_config = model_config
+        self._gradient_checkpointing = False
 
         self.ds4_attention = ds4_attention
         if self.ds4_attention is not None:
@@ -143,6 +165,18 @@ class MoETransformerWrapper(nn.Module):
 
     def reset_moe_aux_loss(self):
         reset_moe_aux_loss(self)
+
+    def set_aux_loss_compute(self, compute: bool):
+        set_aux_loss_compute(self, compute)
+
+    def enable_gradient_checkpointing(self):
+        self._gradient_checkpointing = True
+        if hasattr(self.transformer, 'attn_layers'):
+            attn_layers = self.transformer.attn_layers
+            if hasattr(attn_layers, 'grad_checkpointing'):
+                attn_layers.grad_checkpointing = True
+        count = enable_gradient_checkpointing(self)
+        return count
 
     def forward(self, x, **kwargs):
         return self.autoregressive_wrapper(x, **kwargs)

@@ -79,6 +79,7 @@ def build_model_from_config(model_config, vocab_size, max_seq_len):
         no_bias=not model_config.get("ff_bias", False),
         zero_init_output=True,
         ds4_attention=ds4_attention,
+        batched_experts=model_config.get("batched_experts", False),
     )
 
     return model

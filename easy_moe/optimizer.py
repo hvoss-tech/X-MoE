@@ -58,6 +58,7 @@ class Muon(Optimizer):
         nesterov: bool = True,
         rms_rescale_factor: float = 1.0,
         newton_schulz: HybridNewtonSchulz | None = None,
+        fused: bool = False,
     ):
         if newton_schulz is None:
             newton_schulz = HybridNewtonSchulz()
@@ -65,6 +66,7 @@ class Muon(Optimizer):
         self._newton_schulz = newton_schulz
         self._rms_rescale_factor = rms_rescale_factor
         self._nesterov = nesterov
+        self._fused = fused
 
         defaults = dict(lr=lr, momentum=momentum, weight_decay=weight_decay)
         super().__init__(params, defaults)
@@ -135,6 +137,7 @@ def configure_muon_optimizer(
     adamw_lr: float = 3e-4,
     adamw_weight_decay: float = 0.1,
     rms_rescale_factor: float = 1.0,
+    fused: bool = False,
 ):
     muon_params = []
     adamw_params = []
@@ -173,13 +176,30 @@ def configure_muon_optimizer(
         momentum=momentum,
         weight_decay=weight_decay,
         rms_rescale_factor=rms_rescale_factor,
+        fused=fused,
     )
 
-    adamw_opt = torch.optim.AdamW(
-        adamw_params,
+    adamw_kwargs = dict(
         lr=adamw_lr,
         weight_decay=adamw_weight_decay,
     )
+    if fused and torch.cuda.is_available():
+        try:
+            adamw_opt = torch.optim.AdamW(
+                adamw_params,
+                **adamw_kwargs,
+                fused=True,
+            )
+        except (TypeError, RuntimeError):
+            adamw_opt = torch.optim.AdamW(
+                adamw_params,
+                **adamw_kwargs,
+            )
+    else:
+        adamw_opt = torch.optim.AdamW(
+            adamw_params,
+            **adamw_kwargs,
+        )
 
     return muon_opt, adamw_opt
 

@@ -48,7 +48,7 @@ def main():
         mult=4,
         dropout=0.1,
         no_bias=True,
-        ds4_attention=ds4_block,
+        #ds4_attention=ds4_block,
     )
 
     print(f"MoE Transformer + HCA parameters: {model.num_params:,}")
