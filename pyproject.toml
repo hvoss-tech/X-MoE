@@ -1,0 +1,26 @@
+[project]
+name = "easy-moe"
+version = "0.1.0"
+description = "Mixture of Experts wrapper around x-transformers for training SOTA MoE models"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "x-transformers>=2.19.0",
+    "torch>=2.0.0",
+    "datasets>=2.14.0",
+    "tokenizers>=0.15.0",
+    "einops>=0.7.0",
+]
+
+[project.scripts]
+easy-moe-train = "train:main"
+easy-moe-generate = "generate:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

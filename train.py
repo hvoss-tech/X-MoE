@@ -1,0 +1,464 @@
+import os
+import math
+import argparse
+import time
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+
+from datasets import load_dataset
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import ByteLevel
+
+from x_transformers import TransformerWrapper, Decoder
+
+from easy_moe.wrapper import MoETransformerWrapper
+from easy_moe.optimizer import Muon, MuonWithAdamW, configure_muon_optimizer
+
+
+def train_tokenizer(texts, vocab_size=4096, save_path="tokenizer.json"):
+    tokenizer = Tokenizer(BPE(unk_token="<unk>"))
+    tokenizer.pre_tokenizer = ByteLevel()
+    trainer = BpeTrainer(
+        vocab_size=vocab_size,
+        special_tokens=["<pad>", "<eos>", "<unk>"],
+        show_progress=True,
+    )
+    tokenizer.train_from_iterator(texts, trainer=trainer)
+    tokenizer.save(save_path)
+    return tokenizer
+
+
+def encode(text, tokenizer, max_len):
+    encoded = tokenizer.encode(text).ids
+    if len(encoded) > max_len:
+        encoded = encoded[:max_len]
+    return encoded
+
+
+class TinyStoriesDataset(torch.utils.data.Dataset):
+    def __init__(self, texts, tokenizer, max_seq_len):
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.texts = texts
+        self.eos_id = tokenizer.token_to_id("<eos>")
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        tokens = encode(text, self.tokenizer, self.max_seq_len - 1)
+        tokens = tokens + [self.eos_id]
+        tokens = tokens[: self.max_seq_len]
+        return torch.tensor(tokens, dtype=torch.long)
+
+
+def collate_fn(batch, pad_id=0):
+    max_len = max(b.shape[0] for b in batch)
+    padded = []
+    for b in batch:
+        pad_len = max_len - b.shape[0]
+        if pad_len > 0:
+            padded.append(F.pad(b, (0, pad_len), value=pad_id))
+        else:
+            padded.append(b)
+    return torch.stack(padded)
+
+
+def get_collate_fn(pad_id=0):
+    def _collate(batch):
+        return collate_fn(batch, pad_id=pad_id)
+    return _collate
+
+
+def compute_perplexity(model, dataloader, device, pad_id=0):
+    model.eval()
+    total_loss = 0.0
+    total_tokens = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            batch = batch.to(device)
+            loss = model(batch)
+            if isinstance(loss, tuple):
+                loss = loss[0]
+            num_tokens = (batch[:, 1:] != pad_id).sum().item()
+            total_loss += loss.item() * num_tokens
+            total_tokens += num_tokens
+    if total_tokens == 0:
+        return float("inf")
+    avg_loss = total_loss / total_tokens
+    perplexity = math.exp(avg_loss)
+    return perplexity
+
+
+def build_model(args, vocab_size):
+    decoder = Decoder(
+        dim=args.dim,
+        depth=args.depth,
+        heads=args.heads,
+        ff_glu=not args.no_ff_glu,
+        ff_mult=args.ff_mult,
+        ff_dropout=args.ff_dropout,
+        attn_dropout=args.attn_dropout,
+        layer_dropout=args.layer_dropout,
+        rotary_pos_emb=not args.no_rotary_pos_emb,
+        ff_no_bias=not args.ff_bias,
+    )
+
+    transformer = TransformerWrapper(
+        num_tokens=vocab_size,
+        max_seq_len=args.max_seq_len,
+        attn_layers=decoder,
+        emb_dropout=args.emb_dropout,
+        tie_embedding=True,
+        use_abs_pos_emb=args.no_rotary_pos_emb,
+    )
+
+    ds4_attention = None
+    if args.use_hca or args.use_csa:
+        from easy_moe.attention import HybridAttentionBlock
+        hca_cfg = None
+        csa_cfg = None
+        if args.use_hca:
+            hca_cfg = {
+                "kv_dim": args.hca_kv_dim,
+                "num_query_heads": args.hca_num_heads,
+                "compression_rate": args.hca_compression_rate,
+                "num_groups": args.hca_num_groups,
+                "window_size": args.hca_window_size,
+                "use_attention_sink": args.hca_use_sink,
+                "use_partial_rope": args.hca_use_rope,
+                "rope_dim": args.hca_rope_dim,
+            }
+        if args.use_csa:
+            csa_cfg = {
+                "kv_dim": args.csa_kv_dim,
+                "num_query_heads": args.csa_num_heads,
+                "compression_rate": args.csa_compression_rate,
+                "top_k_blocks": args.csa_top_k_blocks,
+                "num_groups": args.csa_num_groups,
+                "window_size": args.csa_window_size,
+                "use_attention_sink": args.csa_use_sink,
+                "use_partial_rope": args.csa_use_rope,
+                "rope_dim": args.csa_rope_dim,
+            }
+        ds4_attention = HybridAttentionBlock(dim=args.dim, hca_config=hca_cfg, csa_config=csa_cfg)
+
+    model = MoETransformerWrapper(
+        transformer=transformer,
+        num_experts=args.num_experts,
+        expert_top_k=args.expert_top_k,
+        capacity_factor=args.capacity_factor,
+        routing_strategy=args.routing_strategy,
+        load_balance_loss_weight=args.load_balance_loss_weight,
+        z_loss_weight=args.z_loss_weight,
+        moe_every_n_layers=args.moe_every_n_layers,
+        moe_layers=args.moe_layers,
+        glu=not args.no_ff_glu,
+        mult=args.ff_mult,
+        dropout=args.ff_dropout,
+        no_bias=not args.ff_bias,
+        zero_init_output=True,
+        model_config=vars(args),
+        ds4_attention=ds4_attention,
+    )
+
+    return model
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train MoE Transformer on TinyStories")
+
+    parser.add_argument("--dim", type=int, default=256)
+    parser.add_argument("--depth", type=int, default=6)
+    parser.add_argument("--heads", type=int, default=8)
+
+    parser.add_argument("--num-experts", type=int, default=8)
+    parser.add_argument("--expert-top-k", type=int, default=2)
+    parser.add_argument("--routing-strategy", type=str, default="top_k",
+                        choices=["top_k", "expert_choice"])
+    parser.add_argument("--capacity-factor", type=float, default=1.25)
+    parser.add_argument("--load-balance-loss-weight", type=float, default=0.01)
+    parser.add_argument("--z-loss-weight", type=float, default=1e-4)
+    parser.add_argument("--moe-every-n-layers", type=int, default=1)
+    parser.add_argument("--moe-layers", type=str, default=None,
+                        help="Comma-separated FFN layer indices to make MoE (e.g. '0,2,4'). "
+                             "If set, overrides --moe-every-n-layers.")
+
+    parser.add_argument("--max-seq-len", type=int, default=256)
+    parser.add_argument("--vocab-size", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--gradient-accumulate", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.1)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--warmup-steps", type=int, default=500)
+    parser.add_argument("--val-interval", type=int, default=1)
+    parser.add_argument("--save-dir", type=str, default="checkpoints")
+    parser.add_argument("--tokenizer-path", type=str, default=None)
+
+    parser.add_argument("--ff-glu", default=True,
+                        help="Use GLU in FFN (default: True)")
+    parser.add_argument("--no-ff-glu", action="store_true", default=False,
+                        help="Disable GLU in FFN")
+    parser.add_argument("--ff-mult", type=int, default=4)
+    parser.add_argument("--ff-bias", action="store_true", default=False,
+                        help="Use bias in FFN linear layers (default: no bias)")
+    parser.add_argument("--attn-dropout", type=float, default=0.1)
+    parser.add_argument("--ff-dropout", type=float, default=0.1)
+    parser.add_argument("--emb-dropout", type=float, default=0.1)
+    parser.add_argument("--layer-dropout", type=float, default=0.0)
+    parser.add_argument("--no-rotary-pos-emb", action="store_true", default=False)
+
+    parser.add_argument("--use-hca", action="store_true", default=False,
+                        help="Use Heavily Compressed Attention (HCA)")
+    parser.add_argument("--hca-kv-dim", type=int, default=128)
+    parser.add_argument("--hca-num-heads", type=int, default=8)
+    parser.add_argument("--hca-compression-rate", type=int, default=8)
+    parser.add_argument("--hca-num-groups", type=int, default=1)
+    parser.add_argument("--hca-window-size", type=int, default=32)
+    parser.add_argument("--hca-use-sink", action="store_true", default=True)
+    parser.add_argument("--hca-use-rope", action="store_true", default=True)
+    parser.add_argument("--hca-rope-dim", type=int, default=64)
+
+    parser.add_argument("--use-csa", action="store_true", default=False,
+                        help="Use Compressed Sparse Attention (CSA)")
+    parser.add_argument("--csa-kv-dim", type=int, default=128)
+    parser.add_argument("--csa-num-heads", type=int, default=8)
+    parser.add_argument("--csa-compression-rate", type=int, default=4)
+    parser.add_argument("--csa-top-k-blocks", type=int, default=32)
+    parser.add_argument("--csa-num-groups", type=int, default=1)
+    parser.add_argument("--csa-window-size", type=int, default=32)
+    parser.add_argument("--csa-use-sink", action="store_true", default=True)
+    parser.add_argument("--csa-use-rope", action="store_true", default=True)
+    parser.add_argument("--csa-rope-dim", type=int, default=64)
+
+    parser.add_argument("--optimizer", type=str, default="muon",
+                        choices=["adamw", "muon"],
+                        help="Optimizer to use (adamw or muon)")
+    parser.add_argument("--muon-lr", type=float, default=1e-3)
+    parser.add_argument("--muon-momentum", type=float, default=0.9)
+    parser.add_argument("--muon-rms-factor", type=float, default=1.0)
+    parser.add_argument("--adamw-for-non-muon-lr", type=float, default=3e-4)
+
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-samples", type=int, default=None)
+    args = parser.parse_args()
+
+    if args.moe_layers is not None:
+        args.moe_layers = [int(x.strip()) for x in args.moe_layers.split(",")]
+    else:
+        args.moe_layers = None
+
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    print("Loading TinyStories dataset...")
+    ds = load_dataset("roneneldan/TinyStories")
+
+    train_texts = ds["train"]["text"]
+    val_texts = ds["validation"]["text"]
+
+    if args.max_samples is not None:
+        train_texts = train_texts[: args.max_samples]
+        val_texts = val_texts[: min(args.max_samples // 10, len(val_texts))]
+
+    print(f"Train samples: {len(train_texts)}, Val samples: {len(val_texts)}")
+
+    if args.tokenizer_path and os.path.exists(args.tokenizer_path):
+        print(f"Loading tokenizer from {args.tokenizer_path}...")
+        tokenizer = Tokenizer.from_file(args.tokenizer_path)
+    else:
+        print("Training tokenizer...")
+        tokenizer_save_path = str(save_dir / "tokenizer.json")
+        tokenizer = train_tokenizer(
+            train_texts[: min(len(train_texts), 100000)],
+            vocab_size=args.vocab_size,
+            save_path=tokenizer_save_path,
+        )
+        print(f"Tokenizer saved to {tokenizer_save_path}")
+
+    actual_vocab_size = tokenizer.get_vocab_size()
+    print(f"Vocabulary size: {actual_vocab_size}")
+
+    pad_id = tokenizer.token_to_id("<pad>")
+    eos_id = tokenizer.token_to_id("<eos>")
+
+    print("Creating datasets...")
+    train_dataset = TinyStoriesDataset(train_texts, tokenizer, args.max_seq_len)
+    val_dataset = TinyStoriesDataset(val_texts, tokenizer, args.max_seq_len)
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=get_collate_fn(pad_id=pad_id),
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=get_collate_fn(pad_id=pad_id),
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+
+    print("Building MoE Transformer...")
+    model = build_model(args, actual_vocab_size)
+    model = model.to(device)
+    print(f"Model parameters: {model.num_params:,}")
+
+    if args.optimizer == "muon":
+        muon_opt, adamw_opt = configure_muon_optimizer(
+            model,
+            lr=args.muon_lr,
+            momentum=args.muon_momentum,
+            weight_decay=args.weight_decay,
+            adamw_lr=args.adamw_for_non_muon_lr,
+            adamw_weight_decay=args.weight_decay,
+            rms_rescale_factor=args.muon_rms_factor,
+        )
+        optimizer = MuonWithAdamW(muon_opt, adamw_opt)
+        print(f"Using Muon optimizer (muon_lr={args.muon_lr}, adamw_lr={args.adamw_for_non_muon_lr})")
+    else:
+        optimizer = AdamW(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            betas=(0.9, 0.95),
+        )
+        print(f"Using AdamW optimizer (lr={args.lr})")
+
+    warmup_steps = args.warmup_steps
+    total_steps = args.epochs * len(train_loader)
+
+    if args.optimizer == "muon":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            muon_opt, T_max=max(total_steps - warmup_steps, 1), eta_min=args.muon_lr * 0.1
+        )
+        scheduler_adamw = torch.optim.lr_scheduler.CosineAnnealingLR(
+            adamw_opt, T_max=max(total_steps - warmup_steps, 1), eta_min=args.adamw_for_non_muon_lr * 0.1
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=args.lr * 0.1
+        )
+
+    best_val_ppl = float("inf")
+    global_step = 0
+
+    print("Starting training...")
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        epoch_loss = 0.0
+        epoch_tokens = 0
+        epoch_start = time.time()
+
+        for batch_idx, batch in enumerate(train_loader):
+            batch = batch.to(device)
+            loss = model(batch)
+            if isinstance(loss, tuple):
+                loss = loss[0]
+
+            moe_aux = model.moe_aux_loss
+            model.reset_moe_aux_loss()
+            total_loss = loss + moe_aux
+
+            total_loss = total_loss / args.gradient_accumulate
+
+            total_loss.backward()
+
+            if (batch_idx + 1) % args.gradient_accumulate == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
+                if args.optimizer == "muon":
+                    scheduler.step()
+                    scheduler_adamw.step()
+                else:
+                    scheduler.step()
+                optimizer.zero_grad()
+                global_step += 1
+
+            num_tokens = (batch[:, 1:] != pad_id).sum().item()
+            epoch_loss += loss.item() * num_tokens
+            epoch_tokens += num_tokens
+
+            if (batch_idx + 1) % 50 == 0:
+                avg_loss = epoch_loss / epoch_tokens
+                ppl = math.exp(min(avg_loss, 20))
+                lr = optimizer.param_groups[0]["lr"]
+                print(
+                    f"Epoch {epoch}/{args.epochs} | "
+                    f"Step {batch_idx+1}/{len(train_loader)} | "
+                    f"Loss {avg_loss:.4f} | "
+                    f"PPL {ppl:.2f} | "
+                    f"LR {lr:.6f} | "
+                    f"MoE aux {moe_aux.item():.4f}"
+                )
+
+        epoch_time = time.time() - epoch_start
+        avg_train_loss = epoch_loss / epoch_tokens if epoch_tokens > 0 else 0
+        train_ppl = math.exp(min(avg_train_loss, 20))
+
+        print(f"\n--- Epoch {epoch} Summary ---")
+        print(f"Train Loss: {avg_train_loss:.4f} | Train PPL: {train_ppl:.2f} | Time: {epoch_time:.1f}s")
+
+        val_ppl = None
+        if epoch % args.val_interval == 0:
+            print("Computing validation perplexity...")
+            val_ppl = compute_perplexity(model, val_loader, device, pad_id=pad_id)
+            print(f"Validation PPL: {val_ppl:.2f}")
+
+            if val_ppl < best_val_ppl:
+                best_val_ppl = val_ppl
+                best_path = save_dir / "best_model.pt"
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "val_ppl": val_ppl,
+                        "train_ppl": train_ppl,
+                        "model_config": model.model_config,
+                        "vocab_size": actual_vocab_size,
+                        "max_seq_len": args.max_seq_len,
+                    },
+                    best_path,
+                )
+                print(f"New best model saved to {best_path} (PPL: {val_ppl:.2f})")
+
+        checkpoint_path = save_dir / f"checkpoint_epoch_{epoch}.pt"
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_ppl": val_ppl,
+                "model_config": model.model_config,
+                "vocab_size": actual_vocab_size,
+                "max_seq_len": args.max_seq_len,
+            },
+            checkpoint_path,
+        )
+
+    print(f"\nTraining complete! Best validation PPL: {best_val_ppl:.2f}")
+
+
+if __name__ == "__main__":
+    main()
