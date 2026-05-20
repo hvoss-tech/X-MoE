@@ -123,7 +123,7 @@ class MoETransformerWrapper(nn.Module):
         zero_init_output: bool = True,
         model_config: Optional[dict] = None,
         ds4_attention: Optional[HybridAttentionBlock] = None,
-        batched_experts: bool = False,
+        batched_experts: bool = True,
     ):
         super().__init__()
 

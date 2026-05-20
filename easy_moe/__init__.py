@@ -9,7 +9,12 @@ from easy_moe.attention import (
     DS4AttentionLayer,
     HybridAttentionBlock,
 )
-from easy_moe.optimizer import Muon, HybridNewtonSchulz, MuonWithAdamW, configure_muon_optimizer
+from easy_moe.optimizer import (
+    Muon,
+    HybridNewtonSchulz,
+    MuonWithAdamW,
+    configure_muon_optimizer,
+)
 from easy_moe.wrapper import (
     MoETransformerWrapper,
     replace_ffn_with_moe,
@@ -25,6 +30,8 @@ from easy_moe.perf import (
     get_linear_warmup_cosine_scheduler,
     get_warmup_cosine_scheduler_for_muon,
 )
+from easy_moe.trainer import Trainer, TrainConfig, build_model_from_config
+from easy_moe.data import TextDataset, train_tokenizer, collate_fn, get_collate_fn
 
 __all__ = [
     "MoEFFN",
@@ -53,4 +60,11 @@ __all__ = [
     "CUDAGraphCapturer",
     "get_linear_warmup_cosine_scheduler",
     "get_warmup_cosine_scheduler_for_muon",
+    "Trainer",
+    "TrainConfig",
+    "build_model_from_config",
+    "TextDataset",
+    "train_tokenizer",
+    "collate_fn",
+    "get_collate_fn",
 ]

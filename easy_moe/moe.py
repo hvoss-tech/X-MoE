@@ -123,7 +123,7 @@ class MoEFFN(nn.Module):
                 f"Use 'top_k' or 'expert_choice'."
             )
 
-        self._aux_loss = torch.tensor(0.0)
+        self.register_buffer("_aux_loss", torch.tensor(0.0), persistent=False)
         self._num_forward_passes = 0
         self._compute_aux_loss = True
 
@@ -135,8 +135,12 @@ class MoEFFN(nn.Module):
         self.register_buffer("_has_bias_1", torch.tensor(False))
         self.register_buffer("_has_bias_2", torch.tensor(False))
 
-        self.w1_stack = nn.Parameter(torch.empty(self.num_experts, proj_out_dim, self.dim))
-        self.w2_stack = nn.Parameter(torch.empty(self.num_experts, self.dim, self._inner_dim))
+        self.w1_stack = nn.Parameter(
+            torch.empty(self.num_experts, proj_out_dim, self.dim)
+        )
+        self.w2_stack = nn.Parameter(
+            torch.empty(self.num_experts, self.dim, self._inner_dim)
+        )
 
         with torch.no_grad():
             for i, expert in enumerate(self.experts):
@@ -145,10 +149,14 @@ class MoEFFN(nn.Module):
                 self.w2_stack.data[i] = ff_seq[2].weight.data
 
         if not self._no_bias:
-            b1_exists = any(expert.ff[0].proj.bias is not None for expert in self.experts)
+            b1_exists = any(
+                expert.ff[0].proj.bias is not None for expert in self.experts
+            )
             b2_exists = any(expert.ff[2].bias is not None for expert in self.experts)
             if b1_exists:
-                self.b1_stack = nn.Parameter(torch.empty(self.num_experts, proj_out_dim))
+                self.b1_stack = nn.Parameter(
+                    torch.empty(self.num_experts, proj_out_dim)
+                )
                 self._has_bias_1.fill_(True)
                 with torch.no_grad():
                     for i, expert in enumerate(self.experts):
@@ -162,7 +170,6 @@ class MoEFFN(nn.Module):
                         if expert.ff[2].bias is not None:
                             self.b2_stack.data[i] = expert.ff[2].bias.data
 
-        self._dropout_p = self.experts[0].ff[1].p if len(list(self.experts[0].ff[1].children())) == 0 else 0.0
         try:
             self._dropout_p = self.experts[0].ff[1].p
         except AttributeError:
@@ -174,10 +181,18 @@ class MoEFFN(nn.Module):
                 ff_seq = expert.ff
                 ff_seq[0].proj.weight.data.copy_(self.w1_stack.data[i])
                 ff_seq[2].weight.data.copy_(self.w2_stack.data[i])
-                if self._has_bias_1 and hasattr(self, 'b1_stack') and ff_seq[0].proj.bias is not None:
+                if (
+                    self._has_bias_1
+                    and hasattr(self, "b1_stack")
+                    and ff_seq[0].proj.bias is not None
+                ):
                     ff_seq[0].proj.bias.data.copy_(self.b1_stack.data[i])
-                if self._has_bias_2 and hasattr(self, 'b2_stack') and ff_seq[2].bias is not None:
-                    ff_seq[2].bias.data.copy_(self.b2_stack.data[i])
+                if (
+                    self._has_bias_2
+                    and hasattr(self, "b2_stack")
+                    and ff_seq[2].bias is not None
+                ):
+                    ff_seq[2].bias.bias.data.copy_(self.b2_stack.data[i])
 
     def _sync_experts_to_stacked(self):
         with torch.no_grad():
@@ -185,22 +200,120 @@ class MoEFFN(nn.Module):
                 ff_seq = expert.ff
                 self.w1_stack.data[i] = ff_seq[0].proj.weight.data
                 self.w2_stack.data[i] = ff_seq[2].weight.data
-                if self._has_bias_1 and hasattr(self, 'b1_stack') and ff_seq[0].proj.bias is not None:
+                if (
+                    self._has_bias_1
+                    and hasattr(self, "b1_stack")
+                    and ff_seq[0].proj.bias is not None
+                ):
                     self.b1_stack.data[i] = ff_seq[0].proj.bias.data
-                if self._has_bias_2 and hasattr(self, 'b2_stack') and ff_seq[2].bias is not None:
+                if (
+                    self._has_bias_2
+                    and hasattr(self, "b2_stack")
+                    and ff_seq[2].bias is not None
+                ):
                     self.b2_stack.data[i] = ff_seq[2].bias.data
 
     @property
     def aux_loss(self):
         if self._num_forward_passes > 0:
             return self._aux_loss / self._num_forward_passes
-        return torch.tensor(0.0)
+        return torch.tensor(0.0, device=self._aux_loss.device)
 
     def reset_aux_loss(self):
-        self._aux_loss = torch.tensor(0.0, device=next(self.parameters()).device)
+        device = next(self.parameters()).device
+        self._aux_loss = torch.tensor(0.0, device=device)
         self._num_forward_passes = 0
 
+    def _accumulate_aux_loss(self, router_logits, top_indices):
+        if not self._compute_aux_loss:
+            return
+        balance_loss = _compute_load_balance_loss(
+            router_logits, top_indices, self.num_experts
+        )
+        z_loss = _compute_z_loss(router_logits)
+        aux = self.load_balance_loss_weight * balance_loss + self.z_loss_weight * z_loss
+        self._aux_loss = self._aux_loss + aux.detach()
+        self._num_forward_passes += 1
+
+    def _forward_top_k_vectorized(self, x: Tensor, deep_embed=None):
+        orig_shape = x.shape
+        x_flat = x.reshape(-1, self.dim)
+        num_tokens = x_flat.shape[0]
+        weights, top_indices, router_logits = self.gate(x_flat)
+        top_k = top_indices.shape[-1]
+
+        flat_expert_ids = top_indices.reshape(-1)
+        flat_weights = weights.reshape(-1)
+        flat_token_ids = (
+            torch.arange(num_tokens, device=x.device)
+            .unsqueeze(1)
+            .expand(-1, top_k)
+            .reshape(-1)
+        )
+
+        expert_counts = flat_expert_ids.bincount(minlength=self.num_experts)
+        max_count = expert_counts.max().item()
+        if max_count == 0:
+            self._accumulate_aux_loss(router_logits, top_indices)
+            return x_flat.reshape(orig_shape)
+
+        sort_idx = flat_expert_ids.argsort(stable=True)
+        sorted_expert_ids = flat_expert_ids[sort_idx]
+        sorted_token_ids = flat_token_ids[sort_idx]
+        sorted_weights = flat_weights[sort_idx]
+
+        offsets = torch.zeros(self.num_experts + 1, device=x.device, dtype=torch.long)
+        offsets[1:] = expert_counts.cumsum(0)
+        local_positions = (
+            torch.arange(sort_idx.shape[0], device=x.device, dtype=torch.long)
+            - offsets[sorted_expert_ids]
+        )
+
+        padded_input = torch.zeros(
+            self.num_experts,
+            max_count,
+            self.dim,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        padded_input[sorted_expert_ids, local_positions] = x_flat[sorted_token_ids]
+
+        padded_weights = torch.zeros(
+            self.num_experts,
+            max_count,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        padded_weights[sorted_expert_ids, local_positions] = sorted_weights
+
+        pad_mask = torch.zeros(
+            self.num_experts,
+            max_count,
+            dtype=torch.bool,
+            device=x.device,
+        )
+        pad_mask[sorted_expert_ids, local_positions] = True
+
+        batched_out = self._batched_forward(padded_input, pad_mask)
+
+        weighted_out = batched_out * padded_weights.unsqueeze(-1)
+        weighted_out = weighted_out * pad_mask.unsqueeze(-1).float()
+
+        output_flat = torch.zeros_like(x_flat)
+        out_per_expert = weighted_out[sorted_expert_ids, local_positions]
+        output_flat.index_add_(0, sorted_token_ids, out_per_expert)
+
+        self._accumulate_aux_loss(router_logits, top_indices)
+        return output_flat.reshape(orig_shape)
+
     def _forward_top_k(self, x: Tensor, deep_embed=None):
+        if deep_embed is not None:
+            return self._forward_top_k_fallback(x, deep_embed=deep_embed)
+        if self.batched_experts:
+            return self._forward_top_k_vectorized(x)
+        return self._forward_top_k_fallback(x)
+
+    def _forward_top_k_fallback(self, x: Tensor, deep_embed=None):
         orig_shape = x.shape
         x_flat = x.reshape(-1, self.dim)
         num_tokens = x_flat.shape[0]
@@ -209,7 +322,12 @@ class MoEFFN(nn.Module):
 
         flat_indices = top_indices.reshape(-1)
         flat_weights = weights.reshape(-1, 1)
-        token_expert_pairs = torch.arange(num_tokens, device=x.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
+        token_expert_pairs = (
+            torch.arange(num_tokens, device=x.device)
+            .unsqueeze(1)
+            .expand(-1, top_k)
+            .reshape(-1)
+        )
 
         output = torch.zeros_like(x_flat)
         for expert_idx in range(self.num_experts):
@@ -219,94 +337,17 @@ class MoEFFN(nn.Module):
             selected_tokens = token_expert_pairs[expert_mask]
             selected_weights = flat_weights[expert_mask]
             expert_input = x_flat[selected_tokens]
-            expert_out = self.experts[expert_idx](
-                expert_input, deep_embed=deep_embed
-            )
+            expert_out = self.experts[expert_idx](expert_input, deep_embed=deep_embed)
             weighted_out = selected_weights * expert_out
-            output.scatter_add_(0, selected_tokens.unsqueeze(-1).expand_as(weighted_out), weighted_out)
+            output.scatter_add_(
+                0, selected_tokens.unsqueeze(-1).expand_as(weighted_out), weighted_out
+            )
 
-        if self._compute_aux_loss:
-            balance_loss = _compute_load_balance_loss(
-                router_logits, top_indices, self.num_experts
-            )
-            z_loss = _compute_z_loss(router_logits)
-            aux = (
-                self.load_balance_loss_weight * balance_loss
-                + self.z_loss_weight * z_loss
-            )
-            self._aux_loss = self._aux_loss + aux.detach()
-            self._num_forward_passes += 1
+        self._accumulate_aux_loss(router_logits, top_indices)
         return output.reshape(orig_shape)
 
-    def _forward_top_k_batched(self, x: Tensor, deep_embed=None):
-        orig_shape = x.shape
-        x_flat = x.reshape(-1, self.dim)
-        num_tokens = x_flat.shape[0]
-        weights, top_indices, router_logits = self.gate(x_flat)
-        top_k = top_indices.shape[-1]
-
-        flat_indices = top_indices.reshape(-1)
-        flat_weights = weights.reshape(-1, 1)
-        token_ids = torch.arange(num_tokens, device=x.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
-
-        expert_token_counts = torch.zeros(self.num_experts, dtype=torch.long, device=x.device)
-        expert_token_ids_list = [None] * self.num_experts
-        expert_weights_list = [None] * self.num_experts
-
-        for expert_idx in range(self.num_experts):
-            expert_mask = flat_indices == expert_idx
-            count = expert_mask.sum().item()
-            expert_token_counts[expert_idx] = count
-            if count > 0:
-                expert_token_ids_list[expert_idx] = token_ids[expert_mask]
-                expert_weights_list[expert_idx] = flat_weights[expert_mask]
-
-        max_count = expert_token_counts.max().item()
-        if max_count == 0:
-            return x_flat.reshape(orig_shape)
-
-        padded_input = torch.zeros(self.num_experts, max_count, self.dim, device=x.device, dtype=x.dtype)
-        padded_weights = torch.zeros(self.num_experts, max_count, 1, device=x.device, dtype=x.dtype)
-        token_id_pad = torch.zeros(self.num_experts, max_count, dtype=torch.long, device=x.device)
-        pad_mask = torch.zeros(self.num_experts, max_count, dtype=torch.bool, device=x.device)
-
-        for expert_idx in range(self.num_experts):
-            count = expert_token_counts[expert_idx].item()
-            if count > 0:
-                ids = expert_token_ids_list[expert_idx]
-                padded_input[expert_idx, :count] = x_flat[ids]
-                padded_weights[expert_idx, :count] = expert_weights_list[expert_idx]
-                token_id_pad[expert_idx, :count] = ids
-                pad_mask[expert_idx, :count] = True
-
-        batched_out = self._batched_forward(padded_input, pad_mask)
-
-        weighted_out = batched_out * padded_weights
-        weighted_out = weighted_out * pad_mask.unsqueeze(-1).float()
-
-        output_flat = torch.zeros_like(x_flat)
-        for expert_idx in range(self.num_experts):
-            count = expert_token_counts[expert_idx].item()
-            if count > 0:
-                ids = token_id_pad[expert_idx, :count]
-                out = weighted_out[expert_idx, :count]
-                output_flat.scatter_add_(0, ids.unsqueeze(-1).expand_as(out), out)
-
-        if self._compute_aux_loss:
-            balance_loss = _compute_load_balance_loss(
-                router_logits, top_indices, self.num_experts
-            )
-            z_loss = _compute_z_loss(router_logits)
-            aux = (
-                self.load_balance_loss_weight * balance_loss
-                + self.z_loss_weight * z_loss
-            )
-            self._aux_loss = self._aux_loss + aux.detach()
-            self._num_forward_passes += 1
-        return output_flat.reshape(orig_shape)
-
     def _batched_forward(self, padded_input: Tensor, pad_mask: Tensor):
-        if not self.batched_experts or not hasattr(self, 'w1_stack'):
+        if not self.batched_experts or not hasattr(self, "w1_stack"):
             out_all = torch.zeros_like(padded_input)
             for i in range(self.num_experts):
                 count = pad_mask[i].sum().item()
@@ -314,8 +355,8 @@ class MoEFFN(nn.Module):
                     out_all[i, :count] = self.experts[i](padded_input[i, :count])
             return out_all
 
-        h1 = torch.einsum('esi,eoi->eso', padded_input, self.w1_stack)
-        if hasattr(self, 'b1_stack') and self._has_bias_1:
+        h1 = torch.einsum("esi,eoi->eso", padded_input, self.w1_stack)
+        if hasattr(self, "b1_stack") and self._has_bias_1:
             h1 = h1 + self.b1_stack.unsqueeze(1)
 
         if self._glu:
@@ -327,8 +368,8 @@ class MoEFFN(nn.Module):
         if self._dropout_p > 0 and self.training:
             h1 = F.dropout(h1, p=self._dropout_p, training=True)
 
-        h2 = torch.einsum('esi,eoi->eso', h1, self.w2_stack)
-        if hasattr(self, 'b2_stack') and self._has_bias_2:
+        h2 = torch.einsum("esi,eoi->eso", h1, self.w2_stack)
+        if hasattr(self, "b2_stack") and self._has_bias_2:
             h2 = h2 + self.b2_stack.unsqueeze(1)
 
         h2 = h2 * pad_mask.unsqueeze(-1).float()
@@ -352,12 +393,12 @@ class MoEFFN(nn.Module):
             if selected_indices.numel() == 0:
                 continue
             expert_input = x_flat[selected_indices]
-            expert_out = self.experts[expert_idx](
-                expert_input, deep_embed=deep_embed
-            )
+            expert_out = self.experts[expert_idx](expert_input, deep_embed=deep_embed)
             expert_weights = top_scores[expert_idx][valid_mask].unsqueeze(-1)
             weighted_out = expert_weights * expert_out
-            output.scatter_add_(0, selected_indices.unsqueeze(-1).expand_as(weighted_out), weighted_out)
+            output.scatter_add_(
+                0, selected_indices.unsqueeze(-1).expand_as(weighted_out), weighted_out
+            )
 
         if self._compute_aux_loss:
             if router_logits.ndim == 3:
@@ -378,8 +419,6 @@ class MoEFFN(nn.Module):
 
     def forward(self, x: Tensor, deep_embed=None):
         if self.routing_strategy == "top_k":
-            if self.batched_experts:
-                return self._forward_top_k_batched(x, deep_embed=deep_embed)
             return self._forward_top_k(x, deep_embed=deep_embed)
         elif self.routing_strategy == "expert_choice":
             return self._forward_expert_choice_optimized(x, deep_embed=deep_embed)
