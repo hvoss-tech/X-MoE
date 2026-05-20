@@ -252,7 +252,6 @@ class MoEFFN(nn.Module):
         )
 
         expert_counts = flat_expert_ids.bincount(minlength=self.num_experts)
-        max_count_int = num_tokens
 
         sort_idx = flat_expert_ids.argsort(stable=True)
         sorted_expert_ids = flat_expert_ids[sort_idx]
@@ -266,30 +265,39 @@ class MoEFFN(nn.Module):
             - offsets[sorted_expert_ids]
         )
 
+        capacity = min(
+            num_tokens,
+            math.ceil(self.capacity_factor * num_tokens * top_k / self.num_experts),
+        )
         padded_input = torch.zeros(
             self.num_experts,
-            max_count_int,
+            capacity,
             self.dim,
             device=x.device,
             dtype=x.dtype,
         )
-        padded_input[sorted_expert_ids, local_positions] = x_flat[sorted_token_ids]
+        in_bounds = local_positions < capacity
+        valid_sidx = sorted_expert_ids[in_bounds]
+        valid_lpos = local_positions[in_bounds]
+        valid_tidx = sorted_token_ids[in_bounds]
+        valid_w = sorted_weights[in_bounds]
+        padded_input[valid_sidx, valid_lpos] = x_flat[valid_tidx]
 
         padded_weights = torch.zeros(
             self.num_experts,
-            max_count_int,
+            capacity,
             device=x.device,
             dtype=x.dtype,
         )
-        padded_weights[sorted_expert_ids, local_positions] = sorted_weights
+        padded_weights[valid_sidx, valid_lpos] = valid_w
 
         pad_mask = torch.zeros(
             self.num_experts,
-            max_count_int,
+            capacity,
             dtype=torch.bool,
             device=x.device,
         )
-        pad_mask[sorted_expert_ids, local_positions] = True
+        pad_mask[valid_sidx, valid_lpos] = True
 
         batched_out = self._batched_forward(padded_input, pad_mask)
 
@@ -297,8 +305,8 @@ class MoEFFN(nn.Module):
         weighted_out = weighted_out * pad_mask.unsqueeze(-1).float()
 
         output_flat = torch.zeros_like(x_flat)
-        out_per_expert = weighted_out[sorted_expert_ids, local_positions]
-        output_flat.index_add_(0, sorted_token_ids, out_per_expert)
+        out_valid = weighted_out[valid_sidx, valid_lpos]
+        output_flat.index_add_(0, valid_tidx, out_valid)
 
         self._accumulate_aux_loss(router_logits, top_indices)
         return output_flat.reshape(orig_shape)

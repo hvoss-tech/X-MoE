@@ -444,7 +444,7 @@ class Trainer:
             self._trained_epochs = epoch
 
             if validation_string != "":
-                print(self.chat(validation_string))
+                print(validation_string + self.chat(validation_string))
 
         accelerator.print(
             f"\nTraining complete! Best validation PPL: {self.best_val_ppl:.2f}"
