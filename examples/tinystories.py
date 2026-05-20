@@ -102,7 +102,7 @@ def main():
         pad_to_max=True,
         num_workers=8,
     )
-    trainer.train()
+    trainer.train(validation_string="Once upon a time")
 
     print("6. Save checkpoint")
     trainer.save()

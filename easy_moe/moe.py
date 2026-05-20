@@ -252,10 +252,7 @@ class MoEFFN(nn.Module):
         )
 
         expert_counts = flat_expert_ids.bincount(minlength=self.num_experts)
-        max_count = expert_counts.max().item()
-        if max_count == 0:
-            self._accumulate_aux_loss(router_logits, top_indices)
-            return x_flat.reshape(orig_shape)
+        max_count_int = num_tokens
 
         sort_idx = flat_expert_ids.argsort(stable=True)
         sorted_expert_ids = flat_expert_ids[sort_idx]
@@ -271,7 +268,7 @@ class MoEFFN(nn.Module):
 
         padded_input = torch.zeros(
             self.num_experts,
-            max_count,
+            max_count_int,
             self.dim,
             device=x.device,
             dtype=x.dtype,
@@ -280,7 +277,7 @@ class MoEFFN(nn.Module):
 
         padded_weights = torch.zeros(
             self.num_experts,
-            max_count,
+            max_count_int,
             device=x.device,
             dtype=x.dtype,
         )
@@ -288,7 +285,7 @@ class MoEFFN(nn.Module):
 
         pad_mask = torch.zeros(
             self.num_experts,
-            max_count,
+            max_count_int,
             dtype=torch.bool,
             device=x.device,
         )

@@ -64,6 +64,10 @@ def main():
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
+    from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+
+    if tokenizer.decoder is None:
+        tokenizer.decoder = ByteLevelDecoder()
 
     eos_id = tokenizer.token_to_id("<eos>")
     pad_id = tokenizer.token_to_id("<pad>")

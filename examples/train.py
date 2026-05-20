@@ -15,6 +15,7 @@ from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
 from accelerate import Accelerator
 
@@ -33,6 +34,7 @@ from easy_moe.perf import (
 def train_tokenizer(texts, vocab_size=4096, save_path="tokenizer.json"):
     tokenizer = Tokenizer(BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = ByteLevel()
+    tokenizer.decoder = ByteLevelDecoder()
     trainer = BpeTrainer(
         vocab_size=vocab_size,
         special_tokens=["<pad>", "<eos>", "<unk>"],
@@ -83,6 +85,7 @@ def collate_fn(batch, pad_id=0):
 def get_collate_fn(pad_id=0):
     def _collate(batch):
         return collate_fn(batch, pad_id=pad_id)
+
     return _collate
 
 
@@ -135,6 +138,7 @@ def build_model(args, vocab_size):
     ds4_attention = None
     if args.use_hca or args.use_csa:
         from easy_moe.attention import HybridAttentionBlock
+
         hca_cfg = None
         csa_cfg = None
         if args.use_hca:
@@ -160,7 +164,9 @@ def build_model(args, vocab_size):
                 "use_partial_rope": args.hca_use_rope,
                 "rope_dim": args.csa_rope_dim,
             }
-        ds4_attention = HybridAttentionBlock(dim=args.dim, hca_config=hca_cfg, csa_config=csa_cfg)
+        ds4_attention = HybridAttentionBlock(
+            dim=args.dim, hca_config=hca_cfg, csa_config=csa_cfg
+        )
 
     model = MoETransformerWrapper(
         transformer=transformer,
@@ -194,17 +200,29 @@ def main():
 
     parser.add_argument("--num-experts", type=int, default=32)
     parser.add_argument("--expert-top-k", type=int, default=2)
-    parser.add_argument("--routing-strategy", type=str, default="top_k",
-                        choices=["top_k", "expert_choice"])
+    parser.add_argument(
+        "--routing-strategy",
+        type=str,
+        default="top_k",
+        choices=["top_k", "expert_choice"],
+    )
     parser.add_argument("--capacity-factor", type=float, default=1.25)
     parser.add_argument("--load-balance-loss-weight", type=float, default=0.01)
     parser.add_argument("--z-loss-weight", type=float, default=1e-4)
     parser.add_argument("--moe-every-n-layers", type=int, default=1)
-    parser.add_argument("--moe-layers", type=str, default=None,
-                        help="Comma-separated FFN layer indices to make MoE (e.g. '0,2,4'). "
-                             "If set, overrides --moe-every-n-layers.")
-    parser.add_argument("--batched-experts", action="store_true", default=False,
-                        help="Use batched expert computation with stacked parameters")
+    parser.add_argument(
+        "--moe-layers",
+        type=str,
+        default=None,
+        help="Comma-separated FFN layer indices to make MoE (e.g. '0,2,4'). "
+        "If set, overrides --moe-every-n-layers.",
+    )
+    parser.add_argument(
+        "--batched-experts",
+        action="store_true",
+        default=False,
+        help="Use batched expert computation with stacked parameters",
+    )
 
     parser.add_argument("--max-seq-len", type=int, default=256)
     parser.add_argument("--vocab-size", type=int, default=4096)
@@ -218,21 +236,29 @@ def main():
     parser.add_argument("--save-dir", type=str, default="checkpoints")
     parser.add_argument("--tokenizer-path", type=str, default=None)
 
-    parser.add_argument("--ff-glu", default=True,
-                        help="Use GLU in FFN (default: True)")
-    parser.add_argument("--no-ff-glu", action="store_true", default=False,
-                        help="Disable GLU in FFN")
+    parser.add_argument("--ff-glu", default=True, help="Use GLU in FFN (default: True)")
+    parser.add_argument(
+        "--no-ff-glu", action="store_true", default=False, help="Disable GLU in FFN"
+    )
     parser.add_argument("--ff-mult", type=int, default=4)
-    parser.add_argument("--ff-bias", action="store_true", default=False,
-                        help="Use bias in FFN linear layers (default: no bias)")
+    parser.add_argument(
+        "--ff-bias",
+        action="store_true",
+        default=False,
+        help="Use bias in FFN linear layers (default: no bias)",
+    )
     parser.add_argument("--attn-dropout", type=float, default=0.1)
     parser.add_argument("--ff-dropout", type=float, default=0.1)
     parser.add_argument("--emb-dropout", type=float, default=0.1)
     parser.add_argument("--layer-dropout", type=float, default=0.0)
     parser.add_argument("--no-rotary-pos-emb", action="store_true", default=False)
 
-    parser.add_argument("--use-hca", action="store_true", default=True,
-                        help="Use Heavily Compressed Attention (HCA)")
+    parser.add_argument(
+        "--use-hca",
+        action="store_true",
+        default=True,
+        help="Use Heavily Compressed Attention (HCA)",
+    )
     parser.add_argument("--hca-kv-dim", type=int, default=128)
     parser.add_argument("--hca-num-heads", type=int, default=8)
     parser.add_argument("--hca-compression-rate", type=int, default=8)
@@ -242,8 +268,12 @@ def main():
     parser.add_argument("--hca-use-rope", action="store_true", default=True)
     parser.add_argument("--hca-rope-dim", type=int, default=64)
 
-    parser.add_argument("--use-csa", action="store_true", default=False,
-                        help="Use Compressed Sparse Attention (CSA)")
+    parser.add_argument(
+        "--use-csa",
+        action="store_true",
+        default=False,
+        help="Use Compressed Sparse Attention (CSA)",
+    )
     parser.add_argument("--csa-kv-dim", type=int, default=128)
     parser.add_argument("--csa-num-heads", type=int, default=8)
     parser.add_argument("--csa-compression-rate", type=int, default=4)
@@ -254,9 +284,13 @@ def main():
     parser.add_argument("--csa-use-rope", action="store_true", default=True)
     parser.add_argument("--csa-rope-dim", type=int, default=64)
 
-    parser.add_argument("--optimizer", type=str, default="muon",
-                        choices=["adamw", "muon"],
-                        help="Optimizer to use (adamw or muon)")
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="muon",
+        choices=["adamw", "muon"],
+        help="Optimizer to use (adamw or muon)",
+    )
     parser.add_argument("--muon-lr", type=float, default=1e-3)
     parser.add_argument("--muon-momentum", type=float, default=0.9)
     parser.add_argument("--muon-rms-factor", type=float, default=1.0)
@@ -266,23 +300,55 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-samples", type=int, default=None)
 
-    parser.add_argument("--mixed-precision", type=str, default="bf16",
-                        choices=["no", "fp16", "bf16", "fp8"],
-                        help="Mixed precision training mode via accelerate")
-    parser.add_argument("--compile", action="store_true", default=True,
-                        help="Compile the model with torch.compile for faster training")
-    parser.add_argument("--flash-attention", action="store_true", default=True,
-                        help="Enable Flash Attention in the decoder")
-    parser.add_argument("--gradient-checkpointing", action="store_true", default=False,
-                        help="Enable gradient checkpointing to save memory")
-    parser.add_argument("--prefetch-data", action="store_true", default=True,
-                        help="Enable CUDA data prefetching for faster data loading")
-    parser.add_argument("--cuda-graphs", action="store_true", default=True,
-                        help="Capture CUDA graphs for training steps (fixed shape input)")
-    parser.add_argument("--aux-loss-every", type=int, default=1,
-                        help="Compute MoE aux loss every N steps. >1 enables lazy computation.")
-    parser.add_argument("--log-interval", type=int, default=50,
-                        help="Log training metrics every N steps")
+    parser.add_argument(
+        "--mixed-precision",
+        type=str,
+        default="bf16",
+        choices=["no", "fp16", "bf16", "fp8"],
+        help="Mixed precision training mode via accelerate",
+    )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        default=True,
+        help="Compile the model with torch.compile for faster training",
+    )
+    parser.add_argument(
+        "--flash-attention",
+        action="store_true",
+        default=True,
+        help="Enable Flash Attention in the decoder",
+    )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        default=False,
+        help="Enable gradient checkpointing to save memory",
+    )
+    parser.add_argument(
+        "--prefetch-data",
+        action="store_true",
+        default=True,
+        help="Enable CUDA data prefetching for faster data loading",
+    )
+    parser.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        default=True,
+        help="Capture CUDA graphs for training steps (fixed shape input)",
+    )
+    parser.add_argument(
+        "--aux-loss-every",
+        type=int,
+        default=1,
+        help="Compute MoE aux loss every N steps. >1 enables lazy computation.",
+    )
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=50,
+        help="Log training metrics every N steps",
+    )
 
     args = parser.parse_args()
 
@@ -296,9 +362,11 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulate,
     )
 
-    accelerator.print(f"Accelerator: device={accelerator.device}, "
-                      f"mixed_precision={accelerator.mixed_precision}, "
-                      f"num_processes={accelerator.num_processes}")
+    accelerator.print(
+        f"Accelerator: device={accelerator.device}, "
+        f"mixed_precision={accelerator.mixed_precision}, "
+        f"num_processes={accelerator.num_processes}"
+    )
 
     accelerator.wait_for_everyone()
 
@@ -306,6 +374,7 @@ def main():
     torch.cuda.manual_seed_all(args.seed)
     if accelerator.num_processes > 1:
         from accelerate.utils import set_seed
+
         set_seed(args.seed)
 
     save_dir = Path(args.save_dir)
@@ -321,7 +390,9 @@ def main():
         train_texts = train_texts[: args.max_samples]
         val_texts = val_texts[: min(args.max_samples // 10, len(val_texts))]
 
-    accelerator.print(f"Train samples: {len(train_texts)}, Val samples: {len(val_texts)}")
+    accelerator.print(
+        f"Train samples: {len(train_texts)}, Val samples: {len(val_texts)}"
+    )
 
     if args.tokenizer_path and os.path.exists(args.tokenizer_path):
         accelerator.print(f"Loading tokenizer from {args.tokenizer_path}...")
@@ -388,7 +459,9 @@ def main():
             rms_rescale_factor=args.muon_rms_factor,
         )
         optimizer = MuonWithAdamW(muon_opt, adamw_opt)
-        accelerator.print(f"Using Muon optimizer (muon_lr={args.muon_lr}, adamw_lr={args.adamw_for_non_muon_lr})")
+        accelerator.print(
+            f"Using Muon optimizer (muon_lr={args.muon_lr}, adamw_lr={args.adamw_for_non_muon_lr})"
+        )
     else:
         optimizer = AdamW(
             model.parameters(),
@@ -408,12 +481,16 @@ def main():
         adamw_scheduler = get_linear_warmup_cosine_scheduler(
             adamw_opt, warmup_steps, total_steps, eta_min=0.1
         )
-        accelerator.print(f"Using warmup+cosine scheduler: warmup={warmup_steps}, total={total_steps}")
+        accelerator.print(
+            f"Using warmup+cosine scheduler: warmup={warmup_steps}, total={total_steps}"
+        )
     else:
         scheduler = get_linear_warmup_cosine_scheduler(
             optimizer, warmup_steps, total_steps, eta_min=0.1
         )
-        accelerator.print(f"Using warmup+cosine scheduler: warmup={warmup_steps}, total={total_steps}")
+        accelerator.print(
+            f"Using warmup+cosine scheduler: warmup={warmup_steps}, total={total_steps}"
+        )
 
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
@@ -492,7 +569,7 @@ def main():
                 lr = optimizer.param_groups[0]["lr"]
                 accelerator.print(
                     f"Epoch {epoch}/{args.epochs} | "
-                    f"Step {batch_idx+1}/{len(train_loader)} | "
+                    f"Step {batch_idx + 1}/{len(train_loader)} | "
                     f"Loss {avg_loss:.4f} | "
                     f"PPL {ppl:.2f} | "
                     f"LR {lr:.6f} | "
@@ -505,10 +582,14 @@ def main():
         perf_summary = throughput_logger.epoch_summary()
 
         accelerator.print(f"\n--- Epoch {epoch} Summary ---")
-        accelerator.print(f"Train Loss: {avg_train_loss:.4f} | Train PPL: {train_ppl:.2f} | Time: {epoch_time:.1f}s")
+        accelerator.print(
+            f"Train Loss: {avg_train_loss:.4f} | Train PPL: {train_ppl:.2f} | Time: {epoch_time:.1f}s"
+        )
         if perf_summary:
-            accelerator.print(f"Throughput: {perf_summary['tokens_per_sec']:.0f} tokens/s | "
-                              f"{perf_summary['total_tokens']} tokens total")
+            accelerator.print(
+                f"Throughput: {perf_summary['tokens_per_sec']:.0f} tokens/s | "
+                f"{perf_summary['total_tokens']} tokens total"
+            )
 
         val_ppl = None
         if epoch % args.val_interval == 0:
@@ -543,13 +624,17 @@ def main():
                         "optimizer_state_dict": optimizer.state_dict(),
                         "val_ppl": val_ppl,
                         "train_ppl": train_ppl,
-                        "model_config": unwrapped_model.model_config if hasattr(unwrapped_model, 'model_config') else vars(args),
+                        "model_config": unwrapped_model.model_config
+                        if hasattr(unwrapped_model, "model_config")
+                        else vars(args),
                         "vocab_size": actual_vocab_size,
                         "max_seq_len": args.max_seq_len,
                     },
                     best_path,
                 )
-                accelerator.print(f"New best model saved to {best_path} (PPL: {val_ppl:.2f})")
+                accelerator.print(
+                    f"New best model saved to {best_path} (PPL: {val_ppl:.2f})"
+                )
 
         if accelerator.is_main_process:
             checkpoint_path = save_dir / f"checkpoint_epoch_{epoch}.pt"
@@ -560,7 +645,9 @@ def main():
                     "model_state_dict": unwrapped_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_ppl": val_ppl,
-                    "model_config": unwrapped_model.model_config if hasattr(unwrapped_model, 'model_config') else vars(args),
+                    "model_config": unwrapped_model.model_config
+                    if hasattr(unwrapped_model, "model_config")
+                    else vars(args),
                     "vocab_size": actual_vocab_size,
                     "max_seq_len": args.max_seq_len,
                 },

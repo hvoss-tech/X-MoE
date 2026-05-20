@@ -150,6 +150,10 @@ class Trainer:
         self.config = config
         self.model = model
         self.tokenizer = tokenizer
+        if tokenizer.decoder is None:
+            from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+
+            tokenizer.decoder = ByteLevelDecoder()
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
 
@@ -315,7 +319,7 @@ class Trainer:
 
         self.accelerator.print(f"Scheduler: warmup={warmup_steps}, total={total_steps}")
 
-    def train(self,validation_string=""):
+    def train(self, validation_string=""):
         if self.train_dataset is None:
             raise ValueError(
                 "train_dataset is required for training. Provide it in the Trainer constructor."
@@ -445,7 +449,6 @@ class Trainer:
         accelerator.print(
             f"\nTraining complete! Best validation PPL: {self.best_val_ppl:.2f}"
         )
-
 
     def _validate(self):
         accelerator = self.accelerator
