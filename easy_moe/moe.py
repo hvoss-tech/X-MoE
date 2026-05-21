@@ -129,7 +129,9 @@ class MoEFFN(nn.Module):
             )
 
         self.register_buffer("_aux_loss", torch.tensor(0.0), persistent=False)
-        self._num_forward_passes = 0
+        self.register_buffer(
+            "_num_forward_passes", torch.tensor(0, dtype=torch.long), persistent=False
+        )
         self._compute_aux_loss = True
 
         if batched_experts:
@@ -220,14 +222,14 @@ class MoEFFN(nn.Module):
 
     @property
     def aux_loss(self):
-        if self._num_forward_passes > 0:
-            return self._aux_loss / self._num_forward_passes
+        if self._num_forward_passes.item() > 0:
+            return self._aux_loss / self._num_forward_passes.float()
         return torch.tensor(0.0, device=self._aux_loss.device)
 
     def reset_aux_loss(self):
         device = next(self.parameters()).device
         self._aux_loss = torch.tensor(0.0, device=device)
-        self._num_forward_passes = 0
+        self._num_forward_passes.fill_(0)
 
     def _accumulate_aux_loss(self, router_logits, top_indices):
         if not self._compute_aux_loss:
@@ -238,7 +240,7 @@ class MoEFFN(nn.Module):
         z_loss = _compute_z_loss(router_logits)
         aux = self.load_balance_loss_weight * balance_loss + self.z_loss_weight * z_loss
         self._aux_loss = self._aux_loss + aux.detach()
-        self._num_forward_passes += 1
+        self._num_forward_passes.add_(1)
 
     def _forward_top_k_vectorized(self, x: Tensor, deep_embed=None):
         orig_shape = x.shape
@@ -271,10 +273,7 @@ class MoEFFN(nn.Module):
 
         capacity = self._capacity
         in_bounds = local_positions < capacity
-        valid_sidx = sorted_expert_ids[in_bounds]
-        valid_lpos = local_positions[in_bounds]
-        valid_tidx = sorted_token_ids[in_bounds]
-        valid_w = sorted_weights[in_bounds]
+        in_bounds_float = in_bounds.float()
 
         padded_input = torch.zeros(
             self.num_experts,
@@ -283,23 +282,39 @@ class MoEFFN(nn.Module):
             device=x.device,
             dtype=x.dtype,
         )
-        padded_input[valid_sidx, valid_lpos] = x_flat[valid_tidx]
-
         padded_weights = torch.zeros(
             self.num_experts,
             capacity,
             device=x.device,
             dtype=x.dtype,
         )
-        padded_weights[valid_sidx, valid_lpos] = valid_w
-
         pad_mask = torch.zeros(
             self.num_experts,
             capacity,
             dtype=torch.bool,
             device=x.device,
         )
-        pad_mask[valid_sidx, valid_lpos] = True
+
+        sorted_x = x_flat[sorted_token_ids]
+        sorted_in_bounds_x = sorted_x * in_bounds_float.unsqueeze(-1)
+        sorted_in_bounds_w = sorted_weights * in_bounds_float
+
+        flat_expert_idx = sorted_expert_ids * capacity + local_positions
+        valid_flat_idx = flat_expert_idx.clamp(max=self.num_experts * capacity - 1)
+
+        padded_input_flat = padded_input.reshape(-1, self.dim)
+        padded_input_flat.scatter_add_(
+            0,
+            valid_flat_idx.unsqueeze(-1).expand_as(sorted_in_bounds_x),
+            sorted_in_bounds_x,
+        )
+
+        padded_weights_flat = padded_weights.reshape(-1)
+        padded_weights_flat.scatter_add_(0, valid_flat_idx, sorted_in_bounds_w)
+
+        pad_mask_flat = pad_mask.reshape(-1).float()
+        pad_mask_flat.scatter_add_(0, valid_flat_idx, in_bounds_float)
+        pad_mask = pad_mask_flat.reshape(self.num_experts, capacity).clamp(max=1).bool()
 
         batched_out = self._batched_forward(padded_input, pad_mask)
 
@@ -307,8 +322,11 @@ class MoEFFN(nn.Module):
         weighted_out = weighted_out * pad_mask.unsqueeze(-1).float()
 
         output_flat = torch.zeros_like(x_flat)
-        out_valid = weighted_out[valid_sidx, valid_lpos]
-        output_flat.index_add_(0, valid_tidx, out_valid)
+        gathered = weighted_out[
+            sorted_expert_ids, local_positions.clamp(max=capacity - 1)
+        ]
+        gathered = gathered * in_bounds_float.unsqueeze(-1)
+        output_flat.index_add_(0, sorted_token_ids, gathered)
 
         self._accumulate_aux_loss(router_logits, top_indices)
         return output_flat.reshape(orig_shape)
@@ -421,7 +439,7 @@ class MoEFFN(nn.Module):
                 + self.z_loss_weight * z_loss
             )
             self._aux_loss = self._aux_loss + aux.detach()
-            self._num_forward_passes += 1
+            self._num_forward_passes.add_(1)
         return output.reshape(orig_shape)
 
     def forward(self, x: Tensor, deep_embed=None):

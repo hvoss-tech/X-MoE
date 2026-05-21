@@ -31,9 +31,15 @@ from easy_moe import (
 )
 
 
-def _make_model(dim=64, depth=2, heads=4, num_experts=4, top_k=2, batched=False, **kwargs):
-    decoder = Decoder(dim=dim, depth=depth, heads=heads, ff_glu=True, rotary_pos_emb=True)
-    transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+def _make_model(
+    dim=64, depth=2, heads=4, num_experts=4, top_k=2, batched=False, **kwargs
+):
+    decoder = Decoder(
+        dim=dim, depth=depth, heads=heads, ff_glu=True, rotary_pos_emb=True
+    )
+    transformer = TransformerWrapper(
+        num_tokens=100, max_seq_len=64, attn_layers=decoder
+    )
     model = MoETransformerWrapper(
         transformer=transformer,
         num_experts=num_experts,
@@ -123,7 +129,9 @@ class TestBatchedExperts:
             opt.zero_grad()
 
     def test_batched_expert_choice(self):
-        model = _make_model(batched=False, routing_strategy="expert_choice", capacity_factor=1.0)
+        model = _make_model(
+            batched=False, routing_strategy="expert_choice", capacity_factor=1.0
+        )
         x = torch.randint(0, 100, (2, 32))
         loss = model(x)
         assert not torch.isnan(loss)
@@ -185,7 +193,9 @@ class TestWarmupScheduler:
     def test_warmup_scheduler_increases_lr(self):
         model = nn.Linear(10, 10)
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scheduler = get_linear_warmup_cosine_scheduler(opt, warmup_steps=10, total_steps=100, eta_min=0.1)
+        scheduler = get_linear_warmup_cosine_scheduler(
+            opt, warmup_steps=10, total_steps=100, eta_min=0.1
+        )
         lrs = []
         for _ in range(10):
             lrs.append(opt.param_groups[0]["lr"])
@@ -196,7 +206,12 @@ class TestWarmupScheduler:
         model = _make_model()
         muon_opt, adamw_opt = configure_muon_optimizer(model, lr=1e-3, adamw_lr=3e-4)
         muon_s, adamw_s = get_warmup_cosine_scheduler_for_muon(
-            muon_opt, adamw_opt, warmup_steps=5, total_steps=50, muon_lr=1e-3, adamw_lr=3e-4
+            muon_opt,
+            adamw_opt,
+            warmup_steps=5,
+            total_steps=50,
+            muon_lr=1e-3,
+            adamw_lr=3e-4,
         )
         muon_lrs = []
         adamw_lrs = []
@@ -211,7 +226,9 @@ class TestWarmupScheduler:
     def test_warmup_then_decay(self):
         model = nn.Linear(10, 10)
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scheduler = get_linear_warmup_cosine_scheduler(opt, warmup_steps=5, total_steps=50, eta_min=0.1)
+        scheduler = get_linear_warmup_cosine_scheduler(
+            opt, warmup_steps=5, total_steps=50, eta_min=0.1
+        )
         lrs = []
         for _ in range(50):
             lrs.append(opt.param_groups[0]["lr"])
@@ -304,15 +321,25 @@ class TestCUDAGraphCapturer:
 class TestFlashAttention:
     def test_flash_attention_flag(self):
         decoder = Decoder(
-            dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True,
+            dim=64,
+            depth=2,
+            heads=4,
+            ff_glu=True,
+            rotary_pos_emb=True,
             attn_flash=True,
         )
         transformer = TransformerWrapper(
-            num_tokens=100, max_seq_len=64, attn_layers=decoder,
+            num_tokens=100,
+            max_seq_len=64,
+            attn_layers=decoder,
         )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         x = torch.randint(0, 100, (2, 16))
         loss = model(x)
@@ -358,6 +385,7 @@ class TestFusedOptimizer:
 class TestAccelerateIntegration:
     def test_accelerate_basic(self):
         from accelerate import Accelerator
+
         accelerator = Accelerator(mixed_precision=None)
         model = _make_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -371,6 +399,7 @@ class TestAccelerateIntegration:
 
     def test_accelerate_gradient_accumulation(self):
         from accelerate import Accelerator
+
         accelerator = Accelerator(mixed_precision=None, gradient_accumulation_steps=2)
         model = _make_model()
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
@@ -385,7 +414,9 @@ class TestAccelerateIntegration:
 
 
 class TestTorchCompile:
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for compile test")
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA required for compile test"
+    )
     def test_compile_forward_backward(self):
         model = _make_model().cuda()
         model = torch.compile(model, backend="inductor", dynamic=True)
@@ -393,6 +424,58 @@ class TestTorchCompile:
         loss = model(x)
         assert not torch.isnan(loss)
         loss.backward()
+
+    def test_no_recompilation_with_varying_input_sizes(self):
+        import torch._dynamo as dynamo
+
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        dynamo.reset()
+        dynamo.config.recompile_limit = 4
+        compiled = torch.compile(moe, backend="eager", dynamic=True)
+
+        for seq_len in [16, 32, 48, 64, 16, 32]:
+            x = torch.randn(2, seq_len, 64)
+            compiled(x)
+
+    def test_no_recompilation_with_varying_batch_and_seq(self):
+        import torch._dynamo as dynamo
+
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        dynamo.reset()
+        dynamo.config.recompile_limit = 4
+        compiled = torch.compile(moe, backend="eager", dynamic=True)
+
+        for batch, seq in [(1, 16), (2, 32), (4, 16), (1, 48), (3, 24), (2, 64)]:
+            x = torch.randn(batch, seq, 64)
+            compiled(x)
+
+    def test_no_recompilation_full_model(self):
+        import torch._dynamo as dynamo
+
+        model = _make_model(batched=True)
+        dynamo.reset()
+        dynamo.config.recompile_limit = 4
+        compiled = torch.compile(model, backend="eager", dynamic=True)
+
+        for batch, seq in [(2, 16), (2, 32), (2, 48), (2, 64), (1, 16)]:
+            x = torch.randint(0, 100, (batch, seq))
+            compiled(x)
 
 
 class TestFullTrainingLoopWithImprovements:
@@ -423,7 +506,9 @@ class TestFullTrainingLoopWithImprovements:
             combo.zero_grad()
 
         final_loss = model(x).item()
-        assert final_loss < initial_loss, f"Loss did not decrease: {initial_loss:.4f} -> {final_loss:.4f}"
+        assert final_loss < initial_loss, (
+            f"Loss did not decrease: {initial_loss:.4f} -> {final_loss:.4f}"
+        )
 
     def test_batched_expert_training(self):
         model = _make_model(batched=True)

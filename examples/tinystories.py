@@ -15,8 +15,8 @@ from easy_moe.data import TextDataset, train_tokenizer
 def main():
     print("1. Load data")
     ds = load_dataset("roneneldan/TinyStories")
-    train_texts = ds["train"]["text"][:100000]
-    val_texts = ds["validation"]["text"][:100000]
+    train_texts = ds["train"]["text"][:10000]
+    val_texts = ds["validation"]["text"][:10000]
 
     print("2. Train or load a tokenizer")
     tokenizer = train_tokenizer(
