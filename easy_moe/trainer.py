@@ -52,6 +52,7 @@ def build_model_from_config(
     )
 
     ds4_attention = None
+    ds4_config = {}
     if model_config.get("use_hca", False) or model_config.get("use_csa", False):
         from easy_moe.attention import HybridAttentionBlock
 
@@ -68,6 +69,19 @@ def build_model_from_config(
                 "use_partial_rope": model_config.get("hca_use_rope", True),
                 "rope_dim": model_config.get("hca_rope_dim", 64),
             }
+            ds4_config.update(
+                {
+                    "use_hca": True,
+                    "hca_kv_dim": model_config.get("hca_kv_dim", 128),
+                    "hca_num_heads": model_config.get("hca_num_heads", 8),
+                    "hca_compression_rate": model_config.get("hca_compression_rate", 8),
+                    "hca_num_groups": model_config.get("hca_num_groups", 1),
+                    "hca_window_size": model_config.get("hca_window_size", 32),
+                    "hca_use_sink": model_config.get("hca_use_sink", True),
+                    "hca_use_rope": model_config.get("hca_use_rope", True),
+                    "hca_rope_dim": model_config.get("hca_rope_dim", 64),
+                }
+            )
         if model_config.get("use_csa", False):
             csa_cfg = {
                 "kv_dim": model_config.get("csa_kv_dim", 128),
@@ -80,6 +94,20 @@ def build_model_from_config(
                 "use_partial_rope": model_config.get("csa_use_rope", True),
                 "rope_dim": model_config.get("csa_rope_dim", 64),
             }
+            ds4_config.update(
+                {
+                    "use_csa": True,
+                    "csa_kv_dim": model_config.get("csa_kv_dim", 128),
+                    "csa_num_heads": model_config.get("csa_num_heads", 8),
+                    "csa_compression_rate": model_config.get("csa_compression_rate", 4),
+                    "csa_top_k_blocks": model_config.get("csa_top_k_blocks", 32),
+                    "csa_num_groups": model_config.get("csa_num_groups", 1),
+                    "csa_window_size": model_config.get("csa_window_size", 32),
+                    "csa_use_sink": model_config.get("csa_use_sink", True),
+                    "csa_use_rope": model_config.get("csa_use_rope", True),
+                    "csa_rope_dim": model_config.get("csa_rope_dim", 64),
+                }
+            )
         ds4_attention = HybridAttentionBlock(
             dim=model_config.get("dim", 256), hca_config=hca_cfg, csa_config=csa_cfg
         )
@@ -99,11 +127,14 @@ def build_model_from_config(
         dropout=model_config.get("ff_dropout", 0.1),
         no_bias=not model_config.get("ff_bias", False),
         zero_init_output=True,
-        model_config=model_config,
         ds4_attention=ds4_attention,
         batched_experts=model_config.get("batched_experts", False),
-        max_seq_len=max_seq_len,
         max_batch_size=model_config.get("max_batch_size", 1),
+        attn_dropout=model_config.get("attn_dropout", 0.1),
+        layer_dropout=model_config.get("layer_dropout", 0.0),
+        flash_attention=model_config.get("flash_attention", True),
+        emb_dropout=model_config.get("emb_dropout", 0.1),
+        ds4_config=ds4_config if ds4_config else None,
     )
 
     return model
@@ -507,9 +538,7 @@ class Trainer:
             ),
             "val_ppl": val_ppl,
             "train_ppl": train_ppl,
-            "model_config": (
-                model.model_config if hasattr(model, "model_config") else {}
-            ),
+            "model_config": model.model_config,
             "vocab_size": (
                 self.tokenizer.get_vocab_size()
                 if hasattr(self.tokenizer, "get_vocab_size")

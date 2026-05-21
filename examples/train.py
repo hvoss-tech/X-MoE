@@ -136,6 +136,7 @@ def build_model(args, vocab_size):
     )
 
     ds4_attention = None
+    ds4_config = {}
     if args.use_hca or args.use_csa:
         from easy_moe.attention import HybridAttentionBlock
 
@@ -152,6 +153,19 @@ def build_model(args, vocab_size):
                 "use_partial_rope": args.hca_use_rope,
                 "rope_dim": args.hca_rope_dim,
             }
+            ds4_config.update(
+                {
+                    "use_hca": True,
+                    "hca_kv_dim": args.hca_kv_dim,
+                    "hca_num_heads": args.hca_num_heads,
+                    "hca_compression_rate": args.hca_compression_rate,
+                    "hca_num_groups": args.hca_num_groups,
+                    "hca_window_size": args.hca_window_size,
+                    "hca_use_sink": args.hca_use_sink,
+                    "hca_use_rope": args.hca_use_rope,
+                    "hca_rope_dim": args.hca_rope_dim,
+                }
+            )
         if args.use_csa:
             csa_cfg = {
                 "kv_dim": args.csa_kv_dim,
@@ -164,6 +178,20 @@ def build_model(args, vocab_size):
                 "use_partial_rope": args.hca_use_rope,
                 "rope_dim": args.csa_rope_dim,
             }
+            ds4_config.update(
+                {
+                    "use_csa": True,
+                    "csa_kv_dim": args.csa_kv_dim,
+                    "csa_num_heads": args.csa_num_heads,
+                    "csa_compression_rate": args.csa_compression_rate,
+                    "csa_top_k_blocks": args.csa_top_k_blocks,
+                    "csa_num_groups": args.csa_num_groups,
+                    "csa_window_size": args.csa_window_size,
+                    "csa_use_sink": args.csa_use_sink,
+                    "csa_use_rope": args.hca_use_rope,
+                    "csa_rope_dim": args.csa_rope_dim,
+                }
+            )
         ds4_attention = HybridAttentionBlock(
             dim=args.dim, hca_config=hca_cfg, csa_config=csa_cfg
         )
@@ -183,11 +211,14 @@ def build_model(args, vocab_size):
         dropout=args.ff_dropout,
         no_bias=not args.ff_bias,
         zero_init_output=True,
-        model_config=vars(args),
         ds4_attention=ds4_attention,
         batched_experts=args.batched_experts,
-        max_seq_len=args.max_seq_len,
         max_batch_size=args.batch_size,
+        attn_dropout=args.attn_dropout,
+        layer_dropout=args.layer_dropout,
+        flash_attention=args.flash_attention,
+        emb_dropout=args.emb_dropout,
+        ds4_config=ds4_config if ds4_config else None,
     )
 
     return model
@@ -626,9 +657,7 @@ def main():
                         "optimizer_state_dict": optimizer.state_dict(),
                         "val_ppl": val_ppl,
                         "train_ppl": train_ppl,
-                        "model_config": unwrapped_model.model_config
-                        if hasattr(unwrapped_model, "model_config")
-                        else vars(args),
+                        "model_config": unwrapped_model.model_config,
                         "vocab_size": actual_vocab_size,
                         "max_seq_len": args.max_seq_len,
                     },
@@ -647,9 +676,7 @@ def main():
                     "model_state_dict": unwrapped_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "val_ppl": val_ppl,
-                    "model_config": unwrapped_model.model_config
-                    if hasattr(unwrapped_model, "model_config")
-                    else vars(args),
+                    "model_config": unwrapped_model.model_config,
                     "vocab_size": actual_vocab_size,
                     "max_seq_len": args.max_seq_len,
                 },

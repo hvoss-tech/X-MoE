@@ -119,20 +119,22 @@ class MoETransformerWrapper(nn.Module):
         load_balance_loss_weight: float = 0.01,
         z_loss_weight: float = 1e-4,
         moe_every_n_layers: int = 1,
-   moe_layers: Optional[list] = None,
+        moe_layers: Optional[list] = None,
         glu: bool = True,
         mult: int = 4,
         dropout: float = 0.0,
         no_bias: bool = False,
         zero_init_output: bool = True,
-        model_config: Optional[dict] = None,
         ds4_attention: Optional[HybridAttentionBlock] = None,
         batched_experts: bool = True,
         max_batch_size: int = 1,
+        flash_attention: bool = True, #Flash attention is never saved in the decoder...
     ):
         super().__init__()
 
         max_seq_len = transformer.max_seq_len
+        layer_dropout = transformer.attn_layers.layer_dropouts
+        emb_dropout = transformer.emb_dropout
 
         self.transformer = replace_ffn_with_moe(
             transformer,
@@ -157,11 +159,52 @@ class MoETransformerWrapper(nn.Module):
         self.num_experts = num_experts
         self.expert_top_k = expert_top_k
         self.routing_strategy = routing_strategy
-        self.model_config = model_config
         self._gradient_checkpointing = False
+
+        attn_layers = (
+            transformer.attn_layers
+            if hasattr(transformer, "attn_layers")
+            else transformer
+        )
+        has_rotary = bool(getattr(attn_layers, "rotary_pos_emb", False))
+        disable_abs_pos_emb = getattr(
+            attn_layers, "disable_abs_pos_emb", not has_rotary
+        )
+
+        self.model_config = {
+            "dim": getattr(attn_layers, "dim", None),
+            "depth": getattr(attn_layers, "depth", None),
+            "heads": getattr(attn_layers, "attn_heads", None),
+            "no_ff_glu": not glu,
+            "ff_mult": mult,
+            "ff_dropout": dropout,
+            "ff_bias": not no_bias,
+            "layer_dropout": layer_dropout,
+            "no_rotary_pos_emb": not has_rotary,
+            "flash_attention": flash_attention,
+            "emb_dropout": emb_dropout,
+            "use_abs_pos_emb": not disable_abs_pos_emb,
+            "num_experts": num_experts,
+            "expert_top_k": expert_top_k,
+            "capacity_factor": capacity_factor,
+            "routing_strategy": routing_strategy,
+            "load_balance_loss_weight": load_balance_loss_weight,
+            "z_loss_weight": z_loss_weight,
+            "moe_every_n_layers": moe_every_n_layers,
+            "moe_layers": moe_layers,
+            "batched_experts": batched_experts,
+            "max_batch_size": max_batch_size,
+            "max_seq_len": max_seq_len,
+            "vocab_size": getattr(transformer, "num_tokens", None),
+        }
+
+
 
         self.ds4_attention = ds4_attention
         if self.ds4_attention is not None:
+            if self.ds4_attention.config is not None:
+                ds4_config = ds4_attention.config
+                self.model_config.update(ds4_config)
             self.ds4_norm = nn.LayerNorm(
                 transformer.emb_dim
                 if hasattr(transformer, "emb_dim")

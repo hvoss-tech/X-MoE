@@ -37,7 +37,6 @@ def main():
         ff_glu=True,
         ff_mult=4,
         ff_dropout=0.1,
-        attn_dropout=0.1,
         rotary_pos_emb=True,
         ff_no_bias=True,
     )

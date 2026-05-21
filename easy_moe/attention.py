@@ -433,12 +433,15 @@ class HybridAttentionBlock(nn.Module):
     ):
         super().__init__()
         layers = []
+        self.config = None
         if hca_config is not None:
             cfg = {"dim": dim, **hca_config}
             layers.append(DS4AttentionLayer(**cfg, attn_type="hca"))
+            self.config = cfg
         if csa_config is not None:
             cfg = {"dim": dim, **csa_config}
             layers.append(DS4AttentionLayer(**cfg, attn_type="csa"))
+            self.config = cfg
         self.layers = nn.ModuleList(layers)
         self.norm = RMSNorm(dim) if use_rmsnorm else nn.LayerNorm(dim)
 
