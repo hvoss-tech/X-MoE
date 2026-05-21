@@ -1,8 +1,9 @@
 # Easy-MoE
 
 A Mixture of Experts wrapper around [x-transformers](https://github.com/lucidrains/x-transformers) for training state-of-the-art MoE language models.
+This project was primarily done because I really like the x-transformers library, but would like to easily add MoE training on top of it. This library enables exactly that.
 
-Easy-MoE takes any x-transformers `Decoder` / `TransformerWrapper` model and surgically replaces its feed-forward layers with MoE routing layers — giving you sparse, expert-driven architectures with minimal code changes. It ships with two routing strategies, custom DS4 attention mechanisms, the Muon optimizer, CUDA performance utilities, and a full-featured `Trainer`.
+Easy-MoE takes any x-transformers `Decoder` / `TransformerWrapper` model and replaces its feed-forward layers with MoE routing layers, giving you sparse, expert-driven architectures with minimal code changes. It ships with two routing strategies, custom DS4 attention mechanisms, the Muon optimizer, CUDA performance utilities, and a full-featured `Trainer`.
 
 ---
 
@@ -117,7 +118,6 @@ model = MoETransformerWrapper(
     routing_strategy="top_k",
     load_balance_loss_weight=0.01,
     z_loss_weight=1e-4,
-    model_config={...},  # saved for checkpointing
 )
 
 # 5. Train

@@ -25,6 +25,8 @@ def replace_ffn_with_moe(
     no_bias: bool = False,
     zero_init_output: bool = True,
     batched_experts: bool = False,
+    max_seq_len: int = 256,
+    max_batch_size: int = 1,
 ) -> nn.Module:
     attn_layers = None
     if hasattr(model, "attn_layers"):
@@ -68,6 +70,8 @@ def replace_ffn_with_moe(
                 no_bias=no_bias,
                 zero_init_output=zero_init_output,
                 batched_experts=batched_experts,
+                max_seq_len=max_seq_len,
+                max_batch_size=max_batch_size,
             )
             attn_layers.layers[idx][1] = moe
         ffn_count += 1
@@ -124,8 +128,11 @@ class MoETransformerWrapper(nn.Module):
         model_config: Optional[dict] = None,
         ds4_attention: Optional[HybridAttentionBlock] = None,
         batched_experts: bool = True,
+        max_batch_size: int = 1,
     ):
         super().__init__()
+
+        max_seq_len = transformer.max_seq_len
 
         self.transformer = replace_ffn_with_moe(
             transformer,
@@ -143,6 +150,8 @@ class MoETransformerWrapper(nn.Module):
             no_bias=no_bias,
             zero_init_output=zero_init_output,
             batched_experts=batched_experts,
+            max_seq_len=max_seq_len,
+            max_batch_size=max_batch_size,
         )
 
         self.num_experts = num_experts
@@ -153,7 +162,11 @@ class MoETransformerWrapper(nn.Module):
 
         self.ds4_attention = ds4_attention
         if self.ds4_attention is not None:
-            self.ds4_norm = nn.LayerNorm(transformer.emb_dim if hasattr(transformer, 'emb_dim') else transformer.attn_layers.dim)
+            self.ds4_norm = nn.LayerNorm(
+                transformer.emb_dim
+                if hasattr(transformer, "emb_dim")
+                else transformer.attn_layers.dim
+            )
 
         self.autoregressive_wrapper = AutoregressiveWrapper(
             self.transformer,
@@ -171,9 +184,9 @@ class MoETransformerWrapper(nn.Module):
 
     def enable_gradient_checkpointing(self):
         self._gradient_checkpointing = True
-        if hasattr(self.transformer, 'attn_layers'):
+        if hasattr(self.transformer, "attn_layers"):
             attn_layers = self.transformer.attn_layers
-            if hasattr(attn_layers, 'grad_checkpointing'):
+            if hasattr(attn_layers, "grad_checkpointing"):
                 attn_layers.grad_checkpointing = True
         count = enable_gradient_checkpointing(self)
         return count

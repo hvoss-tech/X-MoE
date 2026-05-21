@@ -6,6 +6,7 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+from tqdm import tqdm
 
 
 def train_tokenizer(texts, vocab_size=4096, save_path="tokenizer.json"):
@@ -31,7 +32,7 @@ class TextDataset(torch.utils.data.Dataset):
         self.eos_id = tokenizer.token_to_id("<eos>")
         self._cache = cache
         if cache:
-            self._encoded = [self._encode(text) for text in texts]
+            self._encoded = [self._encode(text) for text in tqdm(texts)]
 
     def _encode(self, text):
         encoded = self.tokenizer.encode(text).ids

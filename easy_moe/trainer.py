@@ -102,6 +102,8 @@ def build_model_from_config(
         model_config=model_config,
         ds4_attention=ds4_attention,
         batched_experts=model_config.get("batched_experts", False),
+        max_seq_len=max_seq_len,
+        max_batch_size=model_config.get("max_batch_size", 1),
     )
 
     return model

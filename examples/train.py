@@ -186,6 +186,8 @@ def build_model(args, vocab_size):
         model_config=vars(args),
         ds4_attention=ds4_attention,
         batched_experts=args.batched_experts,
+        max_seq_len=args.max_seq_len,
+        max_batch_size=args.batch_size,
     )
 
     return model

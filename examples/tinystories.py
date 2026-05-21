@@ -15,8 +15,8 @@ from easy_moe.data import TextDataset, train_tokenizer
 def main():
     print("1. Load data")
     ds = load_dataset("roneneldan/TinyStories")
-    train_texts = ds["train"]["text"][:10000]
-    val_texts = ds["validation"]["text"][:10000]
+    train_texts = ds["train"]["text"][:100000]
+    val_texts = ds["validation"]["text"][:100000]
 
     print("2. Train or load a tokenizer")
     tokenizer = train_tokenizer(
@@ -32,7 +32,7 @@ def main():
     print("4. Build the model")
     decoder = Decoder(
         dim=256,
-        depth=6,
+        depth=12,
         heads=8,
         ff_glu=True,
         ff_mult=4,
@@ -53,7 +53,7 @@ def main():
 
     model = MoETransformerWrapper(
         transformer=transformer,
-        num_experts=16,
+        num_experts=32,
         expert_top_k=2,
         routing_strategy="top_k",
         load_balance_loss_weight=0.01,
@@ -65,6 +65,7 @@ def main():
         no_bias=True,
         zero_init_output=True,
         batched_experts=True,
+        max_batch_size=16,
     )
 
     print("5. Train with the Trainer")

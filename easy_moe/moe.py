@@ -85,6 +85,8 @@ class MoEFFN(nn.Module):
         zero_init_output: bool = True,
         activation: Optional[nn.Module] = None,
         batched_experts: bool = False,
+        max_seq_len: int = 256,
+        max_batch_size: int = 1,
     ):
         super().__init__()
         self.dim = dim
@@ -98,6 +100,9 @@ class MoEFFN(nn.Module):
         self._glu = glu
         self._inner_dim = dim * mult
         self._no_bias = no_bias
+        self._capacity = math.ceil(
+            capacity_factor * max_seq_len * max_batch_size * expert_top_k / num_experts
+        )
 
         self.experts = nn.ModuleList(
             [
@@ -251,13 +256,12 @@ class MoEFFN(nn.Module):
             .reshape(-1)
         )
 
-        expert_counts = flat_expert_ids.bincount(minlength=self.num_experts)
-
         sort_idx = flat_expert_ids.argsort(stable=True)
         sorted_expert_ids = flat_expert_ids[sort_idx]
         sorted_token_ids = flat_token_ids[sort_idx]
         sorted_weights = flat_weights[sort_idx]
 
+        expert_counts = flat_expert_ids.bincount(minlength=self.num_experts)
         offsets = torch.zeros(self.num_experts + 1, device=x.device, dtype=torch.long)
         offsets[1:] = expert_counts.cumsum(0)
         local_positions = (
@@ -265,10 +269,13 @@ class MoEFFN(nn.Module):
             - offsets[sorted_expert_ids]
         )
 
-        capacity = min(
-            num_tokens,
-            math.ceil(self.capacity_factor * num_tokens * top_k / self.num_experts),
-        )
+        capacity = self._capacity
+        in_bounds = local_positions < capacity
+        valid_sidx = sorted_expert_ids[in_bounds]
+        valid_lpos = local_positions[in_bounds]
+        valid_tidx = sorted_token_ids[in_bounds]
+        valid_w = sorted_weights[in_bounds]
+
         padded_input = torch.zeros(
             self.num_experts,
             capacity,
@@ -276,11 +283,6 @@ class MoEFFN(nn.Module):
             device=x.device,
             dtype=x.dtype,
         )
-        in_bounds = local_positions < capacity
-        valid_sidx = sorted_expert_ids[in_bounds]
-        valid_lpos = local_positions[in_bounds]
-        valid_tidx = sorted_token_ids[in_bounds]
-        valid_w = sorted_weights[in_bounds]
         padded_input[valid_sidx, valid_lpos] = x_flat[valid_tidx]
 
         padded_weights = torch.zeros(
