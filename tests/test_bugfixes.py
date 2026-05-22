@@ -449,3 +449,220 @@ class TestReplaceFFNWithMoE:
         )
         moe_count = sum(1 for m in transformer.modules() if isinstance(m, MoEFFN))
         assert moe_count == 2
+
+
+class TestTrainerCollateTruncationBug:
+    def test_trainer_collate_truncates_long_sequences(self):
+        from x_moe.trainer import _make_collate_fn
+
+        collate = _make_collate_fn(pad_id=0, pad_to_max=True, max_seq_len=4)
+        batch = [
+            torch.tensor([1, 2, 3, 4, 5, 6]),
+            torch.tensor([1, 2]),
+        ]
+        result = collate(batch)
+        assert result.shape == (2, 4), f"Expected (2, 4), got {result.shape}"
+        assert result[0, 0].item() == 1
+        assert result[0, 1].item() == 2
+        assert result[0, 2].item() == 3
+        assert result[0, 3].item() == 4
+        assert result[1, 0].item() == 1
+        assert result[1, 1].item() == 2
+        assert result[1, 2].item() == 0
+        assert result[1, 3].item() == 0
+
+    def test_trainer_collate_pad_to_max_exact_length(self):
+        from x_moe.trainer import _make_collate_fn
+
+        collate = _make_collate_fn(pad_id=0, pad_to_max=True, max_seq_len=5)
+        batch = [
+            torch.tensor([1, 2, 3, 4, 5]),
+            torch.tensor([1, 2, 3]),
+        ]
+        result = collate(batch)
+        assert result.shape == (2, 5), f"Expected (2, 5), got {result.shape}"
+        assert result[0, 4].item() == 5
+        assert result[1, 3].item() == 0
+        assert result[1, 4].item() == 0
+
+    def test_trainer_collate_consistency_with_data_collate(self):
+        from x_moe.trainer import _make_collate_fn
+
+        trainer_collate = _make_collate_fn(pad_id=0, pad_to_max=True, max_seq_len=4)
+        data_result = collate_fn(
+            [torch.tensor([1, 2, 3, 4, 5, 6]), torch.tensor([1, 2])],
+            pad_id=0,
+            pad_to_max=True,
+            max_seq_len=4,
+        )
+        trainer_result = trainer_collate(
+            [torch.tensor([1, 2, 3, 4, 5, 6]), torch.tensor([1, 2])]
+        )
+        assert torch.equal(data_result, trainer_result), (
+            "trainer collate and data collate should produce identical results"
+        )
+
+    def test_trainer_collate_no_pad_to_max(self):
+        from x_moe.trainer import _make_collate_fn
+
+        collate = _make_collate_fn(pad_id=0, pad_to_max=False)
+        batch = [
+            torch.tensor([1, 2, 3, 4, 5]),
+            torch.tensor([1, 2, 3]),
+        ]
+        result = collate(batch)
+        assert result.shape == (2, 5), f"Expected (2, 5), got {result.shape}"
+        assert result[1, 3].item() == 0
+        assert result[1, 4].item() == 0
+
+
+class TestAuxLossEveryBug:
+    def test_aux_loss_compute_flag_set_before_forward(self):
+        model = _make_model()
+        model.train()
+        x = torch.randint(0, 100, (2, 16))
+
+        model.set_aux_loss_compute(False)
+        for module in model.modules():
+            if isinstance(module, MoEFFN):
+                assert module._compute_aux_loss is False, (
+                    "aux_loss_compute should be False before forward"
+                )
+
+        model(x)
+        for module in model.modules():
+            if isinstance(module, MoEFFN):
+                assert module._num_forward_passes.item() == 0, (
+                    "aux loss should not accumulate when compute is disabled"
+                )
+
+    def test_aux_loss_every_skips_correctly(self):
+        model = _make_model()
+        model.train()
+        x = torch.randint(0, 100, (2, 16))
+        aux_loss_every = 3
+
+        for step in range(6):
+            should_compute = (aux_loss_every <= 1) or ((step + 1) % aux_loss_every == 0)
+            model.set_aux_loss_compute(should_compute)
+            model(x)
+            model.reset_moe_aux_loss()
+
+        for module in model.modules():
+            if isinstance(module, MoEFFN):
+                assert module._aux_loss.item() == 0.0, (
+                    "aux loss should be zero after reset"
+                )
+
+    def test_aux_loss_disabled_means_no_accumulation(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            max_seq_len=64,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+
+        moe._compute_aux_loss = False
+        moe(x)
+        assert moe._num_forward_passes.item() == 0, (
+            "num_forward_passes should be 0 when aux loss compute is disabled"
+        )
+        assert moe.aux_loss.item() == 0.0, (
+            "aux_loss should be 0 when compute is disabled"
+        )
+
+        moe._compute_aux_loss = True
+        moe(x)
+        assert moe._num_forward_passes.item() == 1, (
+            "num_forward_passes should be 1 after one forward with compute enabled"
+        )
+
+
+class TestAttentionSinkInitBug:
+    def test_attention_sink_init_not_half(self):
+        from x_moe.attention import AttentionSink
+
+        sink = AttentionSink(num_heads=4)
+        attn_logits = torch.randn(1, 4, 8, 8)
+        attn_weights = sink(attn_logits)
+        weight_sum = attn_weights.sum(dim=-1)
+        assert weight_sum.mean().item() > 0.9, (
+            f"Attention weights should sum close to 1.0 at init, got {weight_sum.mean().item():.4f}"
+        )
+
+    def test_attention_sink_init_logits_negative(self):
+        from x_moe.attention import AttentionSink
+
+        sink = AttentionSink(num_heads=4)
+        assert (sink.sink_logits < 0).all(), (
+            "sink_logits should be initialized to negative values so exp(sink_logits) is small"
+        )
+
+    def test_hca_output_magnitude_with_sink(self):
+        from x_moe.attention import HCA
+
+        hca_sink = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_attention_sink=True,
+        )
+        hca_no_sink = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_attention_sink=False,
+        )
+        hca_sink.load_state_dict(hca_no_sink.state_dict(), strict=False)
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_sink = hca_sink(x)
+            out_no_sink = hca_no_sink(x)
+
+        ratio = (out_sink.abs().mean() / out_no_sink.abs().mean()).item()
+        assert ratio > 0.8, (
+            f"Output with sink should be similar magnitude to without sink (ratio={ratio:.4f}), "
+            f"not halved like before the fix"
+        )
+
+    def test_csa_output_magnitude_with_sink(self):
+        from x_moe.attention import CSA
+
+        csa_sink = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=0,
+            window_size=0,
+            use_attention_sink=True,
+        )
+        csa_no_sink = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=0,
+            window_size=0,
+            use_attention_sink=False,
+        )
+        csa_sink.load_state_dict(csa_no_sink.state_dict(), strict=False)
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_sink = csa_sink(x)
+            out_no_sink = csa_no_sink(x)
+
+        ratio = (out_sink.abs().mean() / out_no_sink.abs().mean()).item()
+        assert ratio > 0.8, (
+            f"Output with sink should be similar magnitude to without sink (ratio={ratio:.4f})"
+        )

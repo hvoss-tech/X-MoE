@@ -383,16 +383,15 @@ class Trainer:
                 data_iter = self.train_loader
 
             for batch_idx, batch in enumerate(data_iter):
+                should_compute_aux = (cfg.aux_loss_every <= 1) or (
+                    (batch_idx + 1) % cfg.aux_loss_every == 0
+                )
+                self.model.set_aux_loss_compute(should_compute_aux)
+
                 with accelerator.autocast():
                     loss = self.model(batch)
                     if isinstance(loss, tuple):
                         loss = loss[0]
-
-                    should_compute_aux = (cfg.aux_loss_every <= 1) or (
-                        (batch_idx + 1) % cfg.aux_loss_every == 0
-                    )
-                    if not should_compute_aux:
-                        self.model.set_aux_loss_compute(False)
 
                     moe_aux = self.model.moe_aux_loss
                     self.model.reset_moe_aux_loss()
@@ -707,7 +706,7 @@ def _make_collate_fn(
                 if pad_len > 0:
                     padded.append(F.pad(b, (0, pad_len), value=pad_id))
                 else:
-                    padded.append(b)
+                    padded.append(b[:max_seq_len] if b.shape[0] > max_seq_len else b)
             return torch.stack(padded)
         max_len = max(b.shape[0] for b in batch)
         padded = []

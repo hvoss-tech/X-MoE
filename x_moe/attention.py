@@ -15,7 +15,9 @@ def _rotate_half(x: Tensor) -> Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_partial_rope(t: Tensor, freqs_cos: Tensor, freqs_sin: Tensor, rot_dim: int) -> Tensor:
+def apply_partial_rope(
+    t: Tensor, freqs_cos: Tensor, freqs_sin: Tensor, rot_dim: int
+) -> Tensor:
     t_rot = t[..., :rot_dim]
     t_pass = t[..., rot_dim:]
     fc = freqs_cos[..., :rot_dim]
@@ -29,7 +31,9 @@ class PartialRotaryEmbedding(nn.Module):
         super().__init__()
         self.dim = dim
         self.rot_dim = min(rot_dim, dim)
-        inv_freq = 1.0 / (base ** (torch.arange(0, self.rot_dim, 2).float() / self.rot_dim))
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, self.rot_dim, 2).float() / self.rot_dim)
+        )
         self.register_buffer("inv_freq", inv_freq)
 
     def forward(self, seq_len: int, device: torch.device, dtype: torch.dtype):
@@ -48,12 +52,14 @@ class AttentionSink(nn.Module):
     def __init__(self, num_heads: int):
         super().__init__()
         self.num_heads = num_heads
-        self.sink_logits = nn.Parameter(torch.zeros(num_heads))
+        self.sink_logits = nn.Parameter(torch.full((num_heads,), -10.0))
 
     def forward(self, attn_logits: Tensor) -> Tensor:
         sink_exp = torch.exp(self.sink_logits).view(1, self.num_heads, 1, 1)
         attn_weights = F.softmax(attn_logits, dim=-1)
-        attn_weights = attn_weights / (attn_weights.sum(dim=-1, keepdim=True) + sink_exp)
+        attn_weights = attn_weights / (
+            attn_weights.sum(dim=-1, keepdim=True) + sink_exp
+        )
         return attn_weights
 
 
@@ -84,17 +90,27 @@ class SharedKVMQA(nn.Module):
         self.num_query_heads = num_query_heads
         self.num_groups = num_groups
         self.head_dim = kv_dim
-        self.group_out_dim = group_out_dim if group_out_dim is not None else dim // num_groups
+        self.group_out_dim = (
+            group_out_dim if group_out_dim is not None else dim // num_groups
+        )
 
         self.w_dq = nn.Linear(dim, dim, bias=False)
         self.w_uq = nn.Linear(dim, kv_dim * num_query_heads, bias=False)
 
         if num_groups > 1:
             self.group_projections = nn.ModuleList(
-                [nn.Linear(kv_dim * (num_query_heads // num_groups), self.group_out_dim, bias=False)
-                 for _ in range(num_groups)]
+                [
+                    nn.Linear(
+                        kv_dim * (num_query_heads // num_groups),
+                        self.group_out_dim,
+                        bias=False,
+                    )
+                    for _ in range(num_groups)
+                ]
             )
-            self.output_proj = nn.Linear(self.group_out_dim * num_groups, dim, bias=False)
+            self.output_proj = nn.Linear(
+                self.group_out_dim * num_groups, dim, bias=False
+            )
         else:
             self.output_proj = nn.Linear(kv_dim * num_query_heads, dim, bias=False)
 
@@ -134,7 +150,7 @@ class SharedKVMQA(nn.Module):
         k_t = keys.transpose(1, 2)
         v_t = values.transpose(1, 2)
 
-        scale = self.kv_dim ** -0.5
+        scale = self.kv_dim**-0.5
 
         if sink is not None:
             attn_logits = torch.einsum("bhid,bhjd->bhij", q_t, k_t) * scale
@@ -143,7 +159,11 @@ class SharedKVMQA(nn.Module):
         else:
             out = F.scaled_dot_product_attention(q_t, k_t, v_t, scale=scale)
 
-        out = out.transpose(1, 2).contiguous().view(b, n, self.num_query_heads * self.kv_dim)
+        out = (
+            out.transpose(1, 2)
+            .contiguous()
+            .view(b, n, self.num_query_heads * self.kv_dim)
+        )
 
         if self.num_groups > 1:
             heads_per_group = self.num_query_heads // self.num_groups
@@ -195,7 +215,9 @@ class HCA(nn.Module):
             dropout=dropout,
         )
 
-        self.sliding_window = SlidingWindowKV(dim, window_size, kv_dim) if window_size > 0 else None
+        self.sliding_window = (
+            SlidingWindowKV(dim, window_size, kv_dim) if window_size > 0 else None
+        )
         self.sink = AttentionSink(num_query_heads) if use_attention_sink else None
 
     def _compress_kv(self, x: Tensor) -> Tensor:
@@ -203,7 +225,9 @@ class HCA(nn.Module):
         c = self.w_kv(x)
         z = self.w_z(x)
 
-        pad_len = (self.compression_rate - n % self.compression_rate) % self.compression_rate
+        pad_len = (
+            self.compression_rate - n % self.compression_rate
+        ) % self.compression_rate
         if pad_len > 0:
             c = F.pad(c, (0, 0, 0, pad_len))
             z = F.pad(z, (0, 0, 0, pad_len))
@@ -284,7 +308,9 @@ class CSA(nn.Module):
             dropout=dropout,
         )
 
-        self.sliding_window = SlidingWindowKV(dim, window_size, kv_dim) if window_size > 0 else None
+        self.sliding_window = (
+            SlidingWindowKV(dim, window_size, kv_dim) if window_size > 0 else None
+        )
         self.sink = AttentionSink(num_query_heads) if use_attention_sink else None
 
     def _compress_kv_overlapped(self, x: Tensor) -> Tensor:
