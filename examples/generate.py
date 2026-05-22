@@ -2,7 +2,7 @@ import argparse
 
 import torch
 
-from easy_moe.trainer import build_model_from_config
+from x_moe.trainer import build_model_from_config
 
 
 def main():

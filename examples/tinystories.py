@@ -1,5 +1,5 @@
 """
-Easy-MoE Trainer Example
+X-MoE Trainer Example
 
 A minimal example showing how to train a Mixture-of-Experts Transformer
 using the Trainer API. Just define your dataset, build the model, and train.
@@ -8,8 +8,8 @@ using the Trainer API. Just define your dataset, build the model, and train.
 from datasets import load_dataset
 from x_transformers import TransformerWrapper, Decoder
 
-from easy_moe import MoETransformerWrapper, Trainer
-from easy_moe.data import TextDataset, train_tokenizer
+from x_moe import MoETransformerWrapper, Trainer
+from x_moe.data import TextDataset, train_tokenizer
 
 
 def main():

@@ -6,7 +6,7 @@ import time
 
 from x_transformers import TransformerWrapper, Decoder
 
-from easy_moe import (
+from x_moe import (
     MoETransformerWrapper,
     MoEFFN,
     TopKGate,

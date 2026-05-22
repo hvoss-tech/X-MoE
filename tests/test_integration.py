@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from x_transformers import TransformerWrapper, Decoder
 
-from easy_moe import (
+from x_moe import (
     MoETransformerWrapper,
     MoEFFN,
     HCA,
@@ -98,7 +98,7 @@ class TestMoEWrapper:
 
 class TestDS4Integration:
     def test_wrapper_with_ds4(self):
-        from easy_moe.attention import HybridAttentionBlock
+        from x_moe.attention import HybridAttentionBlock
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
         ds4_block = HybridAttentionBlock(
@@ -115,7 +115,7 @@ class TestDS4Integration:
         assert not torch.isnan(loss)
 
     def test_ds4_with_moe_backward(self):
-        from easy_moe.attention import HybridAttentionBlock
+        from x_moe.attention import HybridAttentionBlock
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
         ds4_block = HybridAttentionBlock(
@@ -213,7 +213,7 @@ class TestEndToEnd:
         assert model.num_trainable_params == model.num_params
 
     def test_replace_attention_standalone(self):
-        from easy_moe.attention import HybridAttentionBlock
+        from x_moe.attention import HybridAttentionBlock
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
         ds4_block = HybridAttentionBlock(

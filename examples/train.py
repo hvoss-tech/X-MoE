@@ -21,9 +21,9 @@ from accelerate import Accelerator
 
 from x_transformers import TransformerWrapper, Decoder
 
-from easy_moe.wrapper import MoETransformerWrapper
-from easy_moe.optimizer import Muon, MuonWithAdamW, configure_muon_optimizer
-from easy_moe.perf import (
+from x_moe.wrapper import MoETransformerWrapper
+from x_moe.optimizer import Muon, MuonWithAdamW, configure_muon_optimizer
+from x_moe.perf import (
     DataPrefetcher,
     ThroughputLogger,
     CUDAGraphCapturer,
@@ -138,7 +138,7 @@ def build_model(args, vocab_size):
     ds4_attention = None
     ds4_config = {}
     if args.use_hca or args.use_csa:
-        from easy_moe.attention import HybridAttentionBlock
+        from x_moe.attention import HybridAttentionBlock
 
         hca_cfg = None
         csa_cfg = None

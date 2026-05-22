@@ -3,7 +3,7 @@ from torch import Tensor
 from torch.optim import Optimizer
 import math
 
-from easy_moe.moe import MoEFFN
+from x_moe.moe import MoEFFN
 
 
 class HybridNewtonSchulz:

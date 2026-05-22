@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import math
 
-from easy_moe.attention import (
+from x_moe.attention import (
     HCA,
     CSA,
     SharedKVMQA,

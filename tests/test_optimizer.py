@@ -2,8 +2,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from easy_moe.optimizer import Muon, HybridNewtonSchulz, MuonWithAdamW, configure_muon_optimizer
-from easy_moe.moe import MoEFFN
+from x_moe.optimizer import Muon, HybridNewtonSchulz, MuonWithAdamW, configure_muon_optimizer
+from x_moe.moe import MoEFFN
 
 
 class TestHybridNewtonSchulz:
@@ -129,7 +129,7 @@ class TestMuonWithAdamW:
 class TestConfigureMuonOptimizer:
     def test_configure(self):
         from x_transformers import TransformerWrapper, Decoder
-        from easy_moe.wrapper import MoETransformerWrapper
+        from x_moe.wrapper import MoETransformerWrapper
 
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
@@ -144,7 +144,7 @@ class TestConfigureMuonOptimizer:
 
     def test_params_dont_overlap(self):
         from x_transformers import TransformerWrapper, Decoder
-        from easy_moe.wrapper import MoETransformerWrapper
+        from x_moe.wrapper import MoETransformerWrapper
 
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
@@ -167,7 +167,7 @@ class TestConfigureMuonOptimizer:
 
     def test_all_params_covered(self):
         from x_transformers import TransformerWrapper, Decoder
-        from easy_moe.wrapper import MoETransformerWrapper
+        from x_moe.wrapper import MoETransformerWrapper
 
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)

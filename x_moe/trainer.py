@@ -13,9 +13,9 @@ from accelerate import Accelerator
 
 from x_transformers import TransformerWrapper, Decoder
 
-from easy_moe.wrapper import MoETransformerWrapper
-from easy_moe.optimizer import MuonWithAdamW, configure_muon_optimizer
-from easy_moe.perf import (
+from x_moe.wrapper import MoETransformerWrapper
+from x_moe.optimizer import MuonWithAdamW, configure_muon_optimizer
+from x_moe.perf import (
     DataPrefetcher,
     ThroughputLogger,
     get_linear_warmup_cosine_scheduler,
@@ -54,7 +54,7 @@ def build_model_from_config(
     ds4_attention = None
     ds4_config = {}
     if model_config.get("use_hca", False) or model_config.get("use_csa", False):
-        from easy_moe.attention import HybridAttentionBlock
+        from x_moe.attention import HybridAttentionBlock
 
         hca_cfg = None
         csa_cfg = None

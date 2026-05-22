@@ -5,8 +5,8 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from x_transformers import TransformerWrapper, Decoder, AutoregressiveWrapper
 from x_transformers.x_transformers import AttentionLayers
 
-from easy_moe.moe import MoEFFN
-from easy_moe.attention import HybridAttentionBlock
+from x_moe.moe import MoEFFN
+from x_moe.attention import HybridAttentionBlock
 
 
 def replace_ffn_with_moe(

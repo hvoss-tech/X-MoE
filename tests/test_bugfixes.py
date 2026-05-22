@@ -4,7 +4,7 @@ import torch.nn as nn
 
 from x_transformers import TransformerWrapper, Decoder
 
-from easy_moe import (
+from x_moe import (
     MoETransformerWrapper,
     MoEFFN,
     TopKGate,
@@ -15,9 +15,9 @@ from easy_moe import (
     set_aux_loss_compute,
     enable_gradient_checkpointing,
 )
-from easy_moe.moe import _compute_load_balance_loss, _compute_z_loss
-from easy_moe.data import collate_fn, get_collate_fn, TextDataset
-from easy_moe.trainer import build_model_from_config
+from x_moe.moe import _compute_load_balance_loss, _compute_z_loss
+from x_moe.data import collate_fn, get_collate_fn, TextDataset
+from x_moe.trainer import build_model_from_config
 
 
 def _make_model(

@@ -1,9 +1,9 @@
-# Easy-MoE
+# X-MoE
 
 A Mixture of Experts wrapper around [x-transformers](https://github.com/lucidrains/x-transformers) for training state-of-the-art MoE language models.
 This project was primarily done because I really like the x-transformers library, but would like to easily add MoE training on top of it. This library enables exactly that.
 
-Easy-MoE takes any x-transformers `Decoder` / `TransformerWrapper` model and replaces its feed-forward layers with MoE routing layers, giving you sparse, expert-driven architectures with minimal code changes. It ships with two routing strategies, custom DS4 attention mechanisms, the Muon optimizer, CUDA performance utilities, and a full-featured `Trainer`.
+X-MoE takes any x-transformers `Decoder` / `TransformerWrapper` model and replaces its feed-forward layers with MoE routing layers, giving you sparse, expert-driven architectures with minimal code changes. It ships with two routing strategies, custom DS4 attention mechanisms, the Muon optimizer, CUDA performance utilities, and a full-featured `Trainer`.
 
 ---
 
@@ -54,8 +54,8 @@ Requires Python >= 3.11 and a CUDA-capable PyTorch install.
 
 ```bash
 # Clone
-git clone git@github.com:hvoss-techfak/Easy-MoE.git
-cd Easy-MoE
+git clone git@github.com:hvoss-techfak/X-MoE.git
+cd X-MoE
 
 # Install with uv (recommended)
 uv sync
@@ -63,17 +63,6 @@ uv sync
 # Or install with pip
 pip install -e ".[dev]"
 ```
-
-### Dependencies
-
-| Package | Version |
-|---|---|
-| x-transformers | >= 2.19.0 |
-| torch | >= 2.0.0 |
-| datasets | >= 2.14.0 |
-| tokenizers | >= 0.15.0 |
-| einops | >= 0.7.0 |
-| accelerate | >= 1.0.0 |
 
 ---
 
@@ -84,8 +73,8 @@ pip install -e ".[dev]"
 ```python
 from datasets import load_dataset
 from x_transformers import TransformerWrapper, Decoder
-from easy_moe import MoETransformerWrapper, Trainer
-from easy_moe.data import TextDataset, train_tokenizer
+from x_moe import MoETransformerWrapper, Trainer
+from x_moe.data import TextDataset, train_tokenizer
 
 # 1. Load data
 ds = load_dataset("roneneldan/TinyStories")
@@ -161,72 +150,12 @@ python examples/generate.py \
 
 ---
 
-## API Reference
+## Citations
 
-### MoE
-
-```python
-from easy_moe import MoEFFN, TopKGate, ExpertChoiceGate
-from easy_moe import MoETransformerWrapper, replace_ffn_with_moe
-from easy_moe import collect_moe_aux_loss, reset_moe_aux_loss, set_aux_loss_compute, enable_gradient_checkpointing
-```
-
-### Attention
-
-```python
-from easy_moe import HCA, CSA, SharedKVMQA, AttentionSink, SlidingWindowKV
-from easy_moe import PartialRotaryEmbedding, DS4AttentionLayer, HybridAttentionBlock
-```
-
-### Optimizer
-
-```python
-from easy_moe import Muon, HybridNewtonSchulz, MuonWithAdamW, configure_muon_optimizer
-```
-
-### Performance
-
-```python
-from easy_moe import DataPrefetcher, ThroughputLogger, CUDAGraphCapturer
-from easy_moe import get_linear_warmup_cosine_scheduler, get_warmup_cosine_scheduler_for_muon
-```
-
-### Training & Data
-
-```python
-from easy_moe import Trainer, TrainConfig, build_model_from_config
-from easy_moe import TextDataset, train_tokenizer, collate_fn, get_collate_fn
-```
-
----
-
-## Testing
-
-```bash
-pytest tests/
-```
-
----
-
-## Project Structure
-
-```
-easy_moe/
-├── __init__.py       # Public API
-├── moe.py            # MoEFFN, TopKGate, ExpertChoiceGate
-├── wrapper.py        # MoETransformerWrapper, aux loss utilities
-├── attention.py      # HCA, CSA, SharedKVMQA, DS4 blocks
-├── optimizer.py      # Muon, MuonWithAdamW, parameter classification
-├── perf.py           # DataPrefetcher, ThroughputLogger, CUDA graphs, schedulers
-├── trainer.py        # Trainer, TrainConfig, build_model_from_config
-└── data.py           # TextDataset, tokenizer training, collation
-examples/
-├── train.py          # Full CLI training script
-├── generate.py       # CLI generation from checkpoints
-└── tinystories.py    # Minimal Trainer API example
-tests/
-├── test_attention.py
-├── test_improvements.py
-├── test_integration.py
-└── test_optimizer.py
+```bibtex
+@misc{deepseekai2026deepseekv4,
+      title={DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence},
+      author={DeepSeek-AI},
+      year={2026},
+}
 ```
