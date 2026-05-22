@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from x_transformers.x_transformers import FeedForward
 
@@ -133,6 +134,7 @@ class MoEFFN(nn.Module):
             "_num_forward_passes", torch.tensor(0, dtype=torch.long), persistent=False
         )
         self._compute_aux_loss = True
+        self._use_gradient_checkpointing = False
 
         if batched_experts:
             self._init_stacked_params()
@@ -199,7 +201,7 @@ class MoEFFN(nn.Module):
                     and hasattr(self, "b2_stack")
                     and ff_seq[2].bias is not None
                 ):
-                    ff_seq[2].bias.bias.data.copy_(self.b2_stack.data[i])
+                    ff_seq[2].bias.data.copy_(self.b2_stack.data[i])
 
     def _sync_experts_to_stacked(self):
         with torch.no_grad():
@@ -227,8 +229,7 @@ class MoEFFN(nn.Module):
         return torch.tensor(0.0, device=self._aux_loss.device)
 
     def reset_aux_loss(self):
-        device = next(self.parameters()).device
-        self._aux_loss = torch.tensor(0.0, device=device)
+        self._aux_loss.fill_(0.0)
         self._num_forward_passes.fill_(0)
 
     def _accumulate_aux_loss(self, router_logits, top_indices):
@@ -355,6 +356,7 @@ class MoEFFN(nn.Module):
         )
 
         output = torch.zeros_like(x_flat)
+        use_ckpt = getattr(self, "_use_gradient_checkpointing", False) and self.training
         for expert_idx in range(self.num_experts):
             expert_mask = flat_indices == expert_idx
             if not expert_mask.any():
@@ -362,7 +364,17 @@ class MoEFFN(nn.Module):
             selected_tokens = token_expert_pairs[expert_mask]
             selected_weights = flat_weights[expert_mask]
             expert_input = x_flat[selected_tokens]
-            expert_out = self.experts[expert_idx](expert_input, deep_embed=deep_embed)
+            if use_ckpt:
+                expert_out = torch_checkpoint(
+                    self.experts[expert_idx],
+                    expert_input,
+                    deep_embed,
+                    use_reentrant=False,
+                )
+            else:
+                expert_out = self.experts[expert_idx](
+                    expert_input, deep_embed=deep_embed
+                )
             weighted_out = selected_weights * expert_out
             output.scatter_add_(
                 0, selected_tokens.unsqueeze(-1).expand_as(weighted_out), weighted_out
@@ -372,12 +384,20 @@ class MoEFFN(nn.Module):
         return output.reshape(orig_shape)
 
     def _batched_forward(self, padded_input: Tensor, pad_mask: Tensor):
+        use_ckpt = getattr(self, "_use_gradient_checkpointing", False) and self.training
         if not self.batched_experts or not hasattr(self, "w1_stack"):
             out_all = torch.zeros_like(padded_input)
             for i in range(self.num_experts):
                 count = pad_mask[i].sum().item()
                 if count > 0:
-                    out_all[i, :count] = self.experts[i](padded_input[i, :count])
+                    if use_ckpt:
+                        out_all[i, :count] = torch_checkpoint(
+                            self.experts[i],
+                            padded_input[i, :count],
+                            use_reentrant=False,
+                        )
+                    else:
+                        out_all[i, :count] = self.experts[i](padded_input[i, :count])
             return out_all
 
         h1 = torch.einsum("esi,eoi->eso", padded_input, self.w1_stack)
@@ -409,6 +429,7 @@ class MoEFFN(nn.Module):
         )
         output = torch.zeros_like(x_flat)
 
+        use_ckpt = getattr(self, "_use_gradient_checkpointing", False) and self.training
         for expert_idx in range(self.num_experts):
             selected_indices = top_indices[expert_idx]
             if not torch.any(selected_indices >= 0):
@@ -418,7 +439,17 @@ class MoEFFN(nn.Module):
             if selected_indices.numel() == 0:
                 continue
             expert_input = x_flat[selected_indices]
-            expert_out = self.experts[expert_idx](expert_input, deep_embed=deep_embed)
+            if use_ckpt:
+                expert_out = torch_checkpoint(
+                    self.experts[expert_idx],
+                    expert_input,
+                    deep_embed,
+                    use_reentrant=False,
+                )
+            else:
+                expert_out = self.experts[expert_idx](
+                    expert_input, deep_embed=deep_embed
+                )
             expert_weights = top_scores[expert_idx][valid_mask].unsqueeze(-1)
             weighted_out = expert_weights * expert_out
             output.scatter_add_(

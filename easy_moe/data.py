@@ -61,9 +61,7 @@ def collate_fn(batch, pad_id=0, pad_to_max=False, max_seq_len=None):
             if pad_len > 0:
                 padded_batch.append(F.pad(b, (0, pad_len), value=pad_id))
             else:
-                padded_batch.append(
-                    b[:, :max_seq_len] if b.shape[0] > max_seq_len else b
-                )
+                padded_batch.append(b[:max_seq_len] if b.shape[0] > max_seq_len else b)
         return torch.stack(padded_batch)
     max_len = max(b.shape[0] for b in batch)
     padded = []

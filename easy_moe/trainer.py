@@ -130,11 +130,7 @@ def build_model_from_config(
         ds4_attention=ds4_attention,
         batched_experts=model_config.get("batched_experts", False),
         max_batch_size=model_config.get("max_batch_size", 1),
-        attn_dropout=model_config.get("attn_dropout", 0.1),
-        layer_dropout=model_config.get("layer_dropout", 0.0),
         flash_attention=model_config.get("flash_attention", True),
-        emb_dropout=model_config.get("emb_dropout", 0.1),
-        ds4_config=ds4_config if ds4_config else None,
     )
 
     return model
