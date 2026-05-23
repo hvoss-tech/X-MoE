@@ -328,7 +328,7 @@ class Trainer:
 
     def _setup_scheduler(self):
         cfg = self.config
-        total_steps = cfg.epochs * len(self.train_loader) // cfg.gradient_accumulate
+        total_steps = cfg.epochs * (len(self.train_loader) // cfg.gradient_accumulate)
         warmup_steps = cfg.warmup_steps
 
         if cfg.optimizer == "muon":

@@ -154,13 +154,21 @@ class MoEFFN(nn.Module):
         with torch.no_grad():
             for i, expert in enumerate(self.experts):
                 ff_seq = expert.ff
-                self.w1_stack.data[i] = ff_seq[0].proj.weight.data
+                if self._glu:
+                    self.w1_stack.data[i] = ff_seq[0].proj.weight.data
+                else:
+                    self.w1_stack.data[i] = ff_seq[0][0].weight.data
                 self.w2_stack.data[i] = ff_seq[2].weight.data
 
         if not self._no_bias:
-            b1_exists = any(
-                expert.ff[0].proj.bias is not None for expert in self.experts
-            )
+            if self._glu:
+                b1_exists = any(
+                    expert.ff[0].proj.bias is not None for expert in self.experts
+                )
+            else:
+                b1_exists = any(
+                    expert.ff[0][0].bias is not None for expert in self.experts
+                )
             b2_exists = any(expert.ff[2].bias is not None for expert in self.experts)
             if b1_exists:
                 self.b1_stack = nn.Parameter(
@@ -169,8 +177,12 @@ class MoEFFN(nn.Module):
                 self._has_bias_1.fill_(True)
                 with torch.no_grad():
                     for i, expert in enumerate(self.experts):
-                        if expert.ff[0].proj.bias is not None:
-                            self.b1_stack.data[i] = expert.ff[0].proj.bias.data
+                        if self._glu:
+                            if expert.ff[0].proj.bias is not None:
+                                self.b1_stack.data[i] = expert.ff[0].proj.bias.data
+                        else:
+                            if expert.ff[0][0].bias is not None:
+                                self.b1_stack.data[i] = expert.ff[0][0].bias.data
             if b2_exists:
                 self.b2_stack = nn.Parameter(torch.empty(self.num_experts, self.dim))
                 self._has_bias_2.fill_(True)
@@ -188,14 +200,18 @@ class MoEFFN(nn.Module):
         with torch.no_grad():
             for i, expert in enumerate(self.experts):
                 ff_seq = expert.ff
-                ff_seq[0].proj.weight.data.copy_(self.w1_stack.data[i])
+                if self._glu:
+                    ff_seq[0].proj.weight.data.copy_(self.w1_stack.data[i])
+                else:
+                    ff_seq[0][0].weight.data.copy_(self.w1_stack.data[i])
                 ff_seq[2].weight.data.copy_(self.w2_stack.data[i])
-                if (
-                    self._has_bias_1
-                    and hasattr(self, "b1_stack")
-                    and ff_seq[0].proj.bias is not None
-                ):
-                    ff_seq[0].proj.bias.data.copy_(self.b1_stack.data[i])
+                if self._has_bias_1 and hasattr(self, "b1_stack"):
+                    if self._glu:
+                        if ff_seq[0].proj.bias is not None:
+                            ff_seq[0].proj.bias.data.copy_(self.b1_stack.data[i])
+                    else:
+                        if ff_seq[0][0].bias is not None:
+                            ff_seq[0][0].bias.data.copy_(self.b1_stack.data[i])
                 if (
                     self._has_bias_2
                     and hasattr(self, "b2_stack")
@@ -207,14 +223,18 @@ class MoEFFN(nn.Module):
         with torch.no_grad():
             for i, expert in enumerate(self.experts):
                 ff_seq = expert.ff
-                self.w1_stack.data[i] = ff_seq[0].proj.weight.data
+                if self._glu:
+                    self.w1_stack.data[i] = ff_seq[0].proj.weight.data
+                else:
+                    self.w1_stack.data[i] = ff_seq[0][0].weight.data
                 self.w2_stack.data[i] = ff_seq[2].weight.data
-                if (
-                    self._has_bias_1
-                    and hasattr(self, "b1_stack")
-                    and ff_seq[0].proj.bias is not None
-                ):
-                    self.b1_stack.data[i] = ff_seq[0].proj.bias.data
+                if self._has_bias_1 and hasattr(self, "b1_stack"):
+                    if self._glu:
+                        if ff_seq[0].proj.bias is not None:
+                            self.b1_stack.data[i] = ff_seq[0].proj.bias.data
+                    else:
+                        if ff_seq[0][0].bias is not None:
+                            self.b1_stack.data[i] = ff_seq[0][0].bias.data
                 if (
                     self._has_bias_2
                     and hasattr(self, "b2_stack")
@@ -357,12 +377,16 @@ class MoEFFN(nn.Module):
 
         output = torch.zeros_like(x_flat)
         use_ckpt = getattr(self, "_use_gradient_checkpointing", False) and self.training
+        capacity = self._capacity
         for expert_idx in range(self.num_experts):
             expert_mask = flat_indices == expert_idx
             if not expert_mask.any():
                 continue
             selected_tokens = token_expert_pairs[expert_mask]
             selected_weights = flat_weights[expert_mask]
+            if selected_tokens.shape[0] > capacity:
+                selected_tokens = selected_tokens[:capacity]
+                selected_weights = selected_weights[:capacity]
             expert_input = x_flat[selected_tokens]
             if use_ckpt:
                 expert_out = torch_checkpoint(
@@ -406,7 +430,7 @@ class MoEFFN(nn.Module):
 
         if self._glu:
             h1, h1_gate = h1.chunk(2, dim=-1)
-            h1 = F.silu(h1_gate) * h1
+            h1 = F.gelu(h1_gate) * h1
         else:
             h1 = F.gelu(h1)
 

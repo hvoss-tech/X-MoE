@@ -257,9 +257,6 @@ class HCA(nn.Module):
             sink=self.sink,
         )
 
-        if win_k is not None:
-            out = out + x
-
         return out
 
 
@@ -383,9 +380,6 @@ class CSA(nn.Module):
             win_v=win_v,
             sink=self.sink,
         )
-
-        if win_k is not None:
-            out = out + x
 
         return out
 

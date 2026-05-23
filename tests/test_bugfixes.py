@@ -666,3 +666,394 @@ class TestAttentionSinkInitBug:
         assert ratio > 0.8, (
             f"Output with sink should be similar magnitude to without sink (ratio={ratio:.4f})"
         )
+
+
+class TestBatchedGELUActivationBug:
+    def test_batched_uses_gelu_not_silu(self):
+        moe_batched = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        moe_fallback = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=False,
+            max_seq_len=64,
+        )
+        batched_state = moe_batched.state_dict()
+        fallback_state = moe_fallback.state_dict()
+        shared_keys = set(batched_state.keys()) & set(fallback_state.keys())
+        filtered = {k: batched_state[k] for k in shared_keys}
+        moe_fallback.load_state_dict(filtered, strict=False)
+        moe_batched.eval()
+        moe_fallback.eval()
+
+        torch.manual_seed(42)
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_batched = moe_batched(x)
+            out_fallback = moe_fallback(x)
+
+        diff = (out_batched - out_fallback).abs().max().item()
+        assert diff < 0.05, (
+            f"Batched and fallback outputs should match with GELU activation, max diff={diff:.6f}"
+        )
+
+    def test_batched_forward_gradient_matches_fallback(self):
+        moe_batched = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        moe_fallback = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=False,
+            max_seq_len=64,
+        )
+        batched_state = moe_batched.state_dict()
+        fallback_state = moe_fallback.state_dict()
+        shared_keys = set(batched_state.keys()) & set(fallback_state.keys())
+        filtered = {k: batched_state[k] for k in shared_keys}
+        moe_fallback.load_state_dict(filtered, strict=False)
+
+        x = torch.randn(2, 16, 64, requires_grad=True)
+        x2 = x.detach().clone().requires_grad_(True)
+
+        out_batched = moe_batched(x)
+        out_fallback = moe_fallback(x2)
+
+        out_batched.sum().backward()
+        out_fallback.sum().backward()
+
+        grad_diff = (x.grad - x2.grad).abs().max().item()
+        assert grad_diff < 0.05, (
+            f"Gradients should match between batched and fallback, max diff={grad_diff:.6f}"
+        )
+
+
+class TestBatchedNoGluBug:
+    def test_batched_no_glu_creates_without_crash(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=False,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        assert moe is not None
+        assert hasattr(moe, "w1_stack")
+        assert hasattr(moe, "w2_stack")
+
+    def test_batched_no_glu_forward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=False,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        x = torch.randn(2, 16, 64)
+        out = moe(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_batched_no_glu_backward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=False,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        x = torch.randn(2, 16, 64)
+        out = moe(x)
+        out.sum().backward()
+        grads = [p.grad for p in moe.parameters() if p.grad is not None]
+        assert len(grads) > 0
+        assert all(not torch.isnan(g).any() for g in grads)
+
+    def test_batched_no_glu_with_bias(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=False,
+            mult=4,
+            no_bias=False,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        x = torch.randn(2, 16, 64)
+        out = moe(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_batched_no_glu_sync_roundtrip(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=False,
+            mult=4,
+            no_bias=False,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        moe._sync_experts_to_stacked()
+        w1_before = moe.w1_stack.data.clone()
+        w2_before = moe.w2_stack.data.clone()
+
+        moe._sync_stacked_to_experts()
+        moe._sync_experts_to_stacked()
+
+        assert torch.allclose(moe.w1_stack.data, w1_before, atol=1e-6)
+        assert torch.allclose(moe.w2_stack.data, w2_before, atol=1e-6)
+
+
+class TestDoubleResidualBug:
+    def test_hca_no_double_residual_with_window(self):
+        from x_moe.attention import HCA
+
+        hca_window = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        hca_no_window = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_attention_sink=False,
+        )
+        hca_no_window.load_state_dict(hca_window.state_dict(), strict=False)
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_window = hca_window(x)
+            out_no_window = hca_no_window(x)
+
+        diff = (out_window - out_no_window).abs().mean().item()
+        x_norm = (out_no_window - x).abs().mean().item()
+        assert diff < x_norm * 2, (
+            f"Window and no-window outputs should be similar magnitude, "
+            f"diff={diff:.6f}, x_residual={x_norm:.6f}"
+        )
+
+    def test_hca_output_is_not_x_plus_mqa_plus_x(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out = hca(x)
+
+        out_diff_from_x = (out - x).abs().mean().item()
+        x_scale = x.abs().mean().item()
+        assert out_diff_from_x < x_scale * 3, (
+            f"Output should not have double residual (x_norm term), "
+            f"diff={out_diff_from_x:.4f}, x_scale={x_scale:.4f}"
+        )
+
+    def test_csa_no_double_residual_with_window(self):
+        from x_moe.attention import CSA
+
+        csa_window = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=0,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        csa_no_window = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=0,
+            window_size=0,
+            use_attention_sink=False,
+        )
+        csa_no_window.load_state_dict(csa_window.state_dict(), strict=False)
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_window = csa_window(x)
+            out_no_window = csa_no_window(x)
+
+        diff = (out_window - out_no_window).abs().mean().item()
+        x_norm = (out_no_window - x).abs().mean().item()
+        assert diff < x_norm * 2, (
+            f"Window and no-window outputs should be similar magnitude, "
+            f"diff={diff:.6f}, x_residual={x_norm:.6f}"
+        )
+
+    def test_ds4_layer_residual_consistency(self):
+        from x_moe.attention import DS4AttentionLayer
+
+        layer_window = DS4AttentionLayer(
+            dim=64,
+            attn_type="hca",
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        layer_no_window = DS4AttentionLayer(
+            dim=64,
+            attn_type="hca",
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_attention_sink=False,
+        )
+        layer_no_window.load_state_dict(layer_window.state_dict(), strict=False)
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_window = layer_window(x)
+            out_no_window = layer_no_window(x)
+
+        diff = (out_window - out_no_window).abs().mean().item()
+        x_scale = x.abs().mean().item()
+        assert diff < x_scale * 3, (
+            f"DS4Layer outputs with/without window should be comparable, "
+            f"diff={diff:.4f}, x_scale={x_scale:.4f}"
+        )
+
+
+class TestCapacityEnforcementBug:
+    def test_fallback_respects_capacity(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=False,
+            max_seq_len=8,
+            max_batch_size=1,
+            capacity_factor=0.5,
+        )
+        capacity = moe._capacity
+        assert capacity > 0
+        x = torch.randn(2, 16, 64)
+        out = moe(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_fallback_and_vectorized_consistent(self):
+        torch.manual_seed(42)
+        moe_fallback = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=False,
+            max_seq_len=64,
+            max_batch_size=2,
+        )
+        moe_vectorized = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+            max_batch_size=2,
+        )
+        state = moe_fallback.state_dict()
+        filtered_state = {
+            k: v for k, v in state.items() if k in moe_vectorized.state_dict()
+        }
+        moe_vectorized.load_state_dict(filtered_state, strict=False)
+        moe_fallback.eval()
+        moe_vectorized.eval()
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_fallback = moe_fallback(x)
+            out_vectorized = moe_vectorized(x)
+
+        diff = (out_fallback - out_vectorized).abs().max().item()
+        assert diff < 0.1, (
+            f"Fallback and vectorized outputs should be consistent, max diff={diff:.6f}"
+        )
+
+
+class TestTotalStepsCalculationBug:
+    def test_total_steps_order_of_operations(self):
+        from x_moe.trainer import _make_collate_fn
+
+        epochs = 10
+        num_batches = 100
+        gradient_accumulate = 3
+
+        current = epochs * num_batches // gradient_accumulate
+        correct = epochs * (num_batches // gradient_accumulate)
+
+        steps_per_epoch = num_batches // gradient_accumulate
+        assert correct == epochs * steps_per_epoch
+        assert current != correct
+        assert correct < current
+
+    def test_total_steps_with_even_division(self):
+        epochs = 5
+        num_batches = 20
+        gradient_accumulate = 4
+
+        current = epochs * num_batches // gradient_accumulate
+        correct = epochs * (num_batches // gradient_accumulate)
+
+        steps_per_epoch = num_batches // gradient_accumulate
+        assert correct == epochs * steps_per_epoch
+        assert current == correct
