@@ -18,6 +18,7 @@ X-MoE takes any x-transformers `Decoder` / `TransformerWrapper` model and replac
 - **Batched experts** — stack expert parameters into single tensors for a vectorized einsum-based forward pass
 
 ### DS4 Attention (Dual-State Sparse Streaming)
+In addition to the MoE routing, I added deepseek CSA/HCA to the project as I wanted to play around with the new attention mechanisms a bit. This will probably be removed as soon as x-transformer implements this.
 
 - **HCA** (Heavily Compressed Attention) — KV compression with learned soft-merging, sliding window, and attention sinks
 - **CSA** (Compressed Sparse Attention) — overlapped block compression + top-K block retrieval via a learned indexer
@@ -121,20 +122,6 @@ trainer.save()
 # 6. Load and generate
 trainer = Trainer.load("checkpoints/best_model.pt", tokenizer=tokenizer)
 print(trainer.chat("Once upon a time"))
-```
-
-### Train with the CLI
-
-```bash
-python examples/train.py \
-  --dim 256 --depth 12 --heads 8 \
-  --num-experts 32 --expert-top-k 2 \
-  --routing-strategy top_k \
-  --optimizer muon --muon-lr 1e-3 \
-  --batch-size 32 --epochs 10 \
-  --mixed-precision bf16 \
-  --flash-attention --compile \
-  --max-seq-len 256 --vocab-size 4096
 ```
 
 ### Generate from a checkpoint
