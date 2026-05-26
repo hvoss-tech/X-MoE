@@ -51,67 +51,6 @@ def build_model_from_config(
         use_abs_pos_emb=model_config.get("no_rotary_pos_emb", False),
     )
 
-    ds4_attention = None
-    ds4_config = {}
-    if model_config.get("use_hca", False) or model_config.get("use_csa", False):
-        from x_moe.attention import HybridAttentionBlock
-
-        hca_cfg = None
-        csa_cfg = None
-        if model_config.get("use_hca", False):
-            hca_cfg = {
-                "kv_dim": model_config.get("hca_kv_dim", 128),
-                "num_query_heads": model_config.get("hca_num_heads", 8),
-                "compression_rate": model_config.get("hca_compression_rate", 8),
-                "num_groups": model_config.get("hca_num_groups", 1),
-                "window_size": model_config.get("hca_window_size", 32),
-                "use_attention_sink": model_config.get("hca_use_sink", True),
-                "use_partial_rope": model_config.get("hca_use_rope", True),
-                "rope_dim": model_config.get("hca_rope_dim", 64),
-            }
-            ds4_config.update(
-                {
-                    "use_hca": True,
-                    "hca_kv_dim": model_config.get("hca_kv_dim", 128),
-                    "hca_num_heads": model_config.get("hca_num_heads", 8),
-                    "hca_compression_rate": model_config.get("hca_compression_rate", 8),
-                    "hca_num_groups": model_config.get("hca_num_groups", 1),
-                    "hca_window_size": model_config.get("hca_window_size", 32),
-                    "hca_use_sink": model_config.get("hca_use_sink", True),
-                    "hca_use_rope": model_config.get("hca_use_rope", True),
-                    "hca_rope_dim": model_config.get("hca_rope_dim", 64),
-                }
-            )
-        if model_config.get("use_csa", False):
-            csa_cfg = {
-                "kv_dim": model_config.get("csa_kv_dim", 128),
-                "num_query_heads": model_config.get("csa_num_heads", 8),
-                "compression_rate": model_config.get("csa_compression_rate", 4),
-                "top_k_blocks": model_config.get("csa_top_k_blocks", 32),
-                "num_groups": model_config.get("csa_num_groups", 1),
-                "window_size": model_config.get("csa_window_size", 32),
-                "use_attention_sink": model_config.get("csa_use_sink", True),
-                "use_partial_rope": model_config.get("csa_use_rope", True),
-                "rope_dim": model_config.get("csa_rope_dim", 64),
-            }
-            ds4_config.update(
-                {
-                    "use_csa": True,
-                    "csa_kv_dim": model_config.get("csa_kv_dim", 128),
-                    "csa_num_heads": model_config.get("csa_num_heads", 8),
-                    "csa_compression_rate": model_config.get("csa_compression_rate", 4),
-                    "csa_top_k_blocks": model_config.get("csa_top_k_blocks", 32),
-                    "csa_num_groups": model_config.get("csa_num_groups", 1),
-                    "csa_window_size": model_config.get("csa_window_size", 32),
-                    "csa_use_sink": model_config.get("csa_use_sink", True),
-                    "csa_use_rope": model_config.get("csa_use_rope", True),
-                    "csa_rope_dim": model_config.get("csa_rope_dim", 64),
-                }
-            )
-        ds4_attention = HybridAttentionBlock(
-            dim=model_config.get("dim", 256), hca_config=hca_cfg, csa_config=csa_cfg
-        )
-
     model = MoETransformerWrapper(
         transformer=transformer,
         num_experts=model_config.get("num_experts", 32),
@@ -127,10 +66,23 @@ def build_model_from_config(
         dropout=model_config.get("ff_dropout", 0.1),
         no_bias=not model_config.get("ff_bias", False),
         zero_init_output=True,
-        ds4_attention=ds4_attention,
         batched_experts=model_config.get("batched_experts", False),
         max_batch_size=model_config.get("max_batch_size", 1),
         flash_attention=model_config.get("flash_attention", True),
+        use_hca=model_config.get("use_hca", False),
+        use_csa=model_config.get("use_csa", False),
+        kv_dim=model_config.get("kv_dim", 128),
+        num_query_heads=model_config.get("num_query_heads", 8),
+        compression_rate=model_config.get("compression_rate", 8),
+        num_groups=model_config.get("num_groups", 1),
+        group_out_dim=model_config.get("group_out_dim", None),
+        window_size=model_config.get("window_size", 32),
+        use_attention_sink=model_config.get("use_attention_sink", True),
+        use_partial_rope=model_config.get("use_partial_rope", True),
+        rope_dim=model_config.get("rope_dim", 64),
+        attn_dropout=model_config.get("attn_dropout", 0.0),
+        csa_top_k_blocks=model_config.get("csa_top_k_blocks", 32),
+        csa_indexer_dim=model_config.get("csa_indexer_dim", None),
     )
 
     return model
@@ -363,6 +315,7 @@ class Trainer:
 
         throughput_logger = ThroughputLogger(log_interval=cfg.log_interval)
         global_step = 0
+        total_tokens = 0
 
         accelerator.print("Starting training...")
         for epoch in range(1, cfg.epochs + 1):
@@ -451,9 +404,10 @@ class Trainer:
                 f"Train PPL: {train_ppl:.2f} | Time: {epoch_time:.1f}s"
             )
             if perf_summary:
+                total_tokens += perf_summary['total_tokens']
                 accelerator.print(
                     f"Throughput: {perf_summary['tokens_per_sec']:.0f} tokens/s | "
-                    f"{perf_summary['total_tokens']} tokens total"
+                    f"{total_tokens} tokens total"
                 )
 
             val_ppl = None

@@ -135,67 +135,6 @@ def build_model(args, vocab_size):
         use_abs_pos_emb=args.no_rotary_pos_emb,
     )
 
-    ds4_attention = None
-    ds4_config = {}
-    if args.use_hca or args.use_csa:
-        from x_moe.attention import HybridAttentionBlock
-
-        hca_cfg = None
-        csa_cfg = None
-        if args.use_hca:
-            hca_cfg = {
-                "kv_dim": args.hca_kv_dim,
-                "num_query_heads": args.hca_num_heads,
-                "compression_rate": args.hca_compression_rate,
-                "num_groups": args.hca_num_groups,
-                "window_size": args.hca_window_size,
-                "use_attention_sink": args.hca_use_sink,
-                "use_partial_rope": args.hca_use_rope,
-                "rope_dim": args.hca_rope_dim,
-            }
-            ds4_config.update(
-                {
-                    "use_hca": True,
-                    "hca_kv_dim": args.hca_kv_dim,
-                    "hca_num_heads": args.hca_num_heads,
-                    "hca_compression_rate": args.hca_compression_rate,
-                    "hca_num_groups": args.hca_num_groups,
-                    "hca_window_size": args.hca_window_size,
-                    "hca_use_sink": args.hca_use_sink,
-                    "hca_use_rope": args.hca_use_rope,
-                    "hca_rope_dim": args.hca_rope_dim,
-                }
-            )
-        if args.use_csa:
-            csa_cfg = {
-                "kv_dim": args.csa_kv_dim,
-                "num_query_heads": args.csa_num_heads,
-                "compression_rate": args.csa_compression_rate,
-                "top_k_blocks": args.csa_top_k_blocks,
-                "num_groups": args.csa_num_groups,
-                "window_size": args.csa_window_size,
-                "use_attention_sink": args.csa_use_sink,
-                "use_partial_rope": args.hca_use_rope,
-                "rope_dim": args.csa_rope_dim,
-            }
-            ds4_config.update(
-                {
-                    "use_csa": True,
-                    "csa_kv_dim": args.csa_kv_dim,
-                    "csa_num_heads": args.csa_num_heads,
-                    "csa_compression_rate": args.csa_compression_rate,
-                    "csa_top_k_blocks": args.csa_top_k_blocks,
-                    "csa_num_groups": args.csa_num_groups,
-                    "csa_window_size": args.csa_window_size,
-                    "csa_use_sink": args.csa_use_sink,
-                    "csa_use_rope": args.hca_use_rope,
-                    "csa_rope_dim": args.csa_rope_dim,
-                }
-            )
-        ds4_attention = HybridAttentionBlock(
-            dim=args.dim, hca_config=hca_cfg, csa_config=csa_cfg
-        )
-
     model = MoETransformerWrapper(
         transformer=transformer,
         num_experts=args.num_experts,
@@ -211,14 +150,23 @@ def build_model(args, vocab_size):
         dropout=args.ff_dropout,
         no_bias=not args.ff_bias,
         zero_init_output=True,
-        ds4_attention=ds4_attention,
         batched_experts=args.batched_experts,
         max_batch_size=args.batch_size,
-        attn_dropout=args.attn_dropout,
-        layer_dropout=args.layer_dropout,
         flash_attention=args.flash_attention,
-        emb_dropout=args.emb_dropout,
-        ds4_config=ds4_config if ds4_config else None,
+        use_hca=args.use_hca,
+        use_csa=args.use_csa,
+        kv_dim=args.kv_dim,
+        num_query_heads=args.num_query_heads,
+        compression_rate=args.compression_rate,
+        num_groups=args.num_groups,
+        group_out_dim=args.group_out_dim if args.group_out_dim > 0 else None,
+        window_size=args.window_size,
+        use_attention_sink=args.use_attention_sink,
+        use_partial_rope=args.use_partial_rope,
+        rope_dim=args.rope_dim,
+        attn_dropout=args.attn_dropout,
+        csa_top_k_blocks=args.csa_top_k_blocks,
+        csa_indexer_dim=args.csa_indexer_dim if args.csa_indexer_dim > 0 else None,
     )
 
     return model
@@ -292,30 +240,63 @@ def main():
         default=True,
         help="Use Heavily Compressed Attention (HCA)",
     )
-    parser.add_argument("--hca-kv-dim", type=int, default=128)
-    parser.add_argument("--hca-num-heads", type=int, default=8)
-    parser.add_argument("--hca-compression-rate", type=int, default=8)
-    parser.add_argument("--hca-num-groups", type=int, default=1)
-    parser.add_argument("--hca-window-size", type=int, default=32)
-    parser.add_argument("--hca-use-sink", action="store_true", default=True)
-    parser.add_argument("--hca-use-rope", action="store_true", default=True)
-    parser.add_argument("--hca-rope-dim", type=int, default=64)
-
     parser.add_argument(
         "--use-csa",
         action="store_true",
         default=False,
         help="Use Compressed Sparse Attention (CSA)",
     )
-    parser.add_argument("--csa-kv-dim", type=int, default=128)
-    parser.add_argument("--csa-num-heads", type=int, default=8)
-    parser.add_argument("--csa-compression-rate", type=int, default=4)
-    parser.add_argument("--csa-top-k-blocks", type=int, default=32)
-    parser.add_argument("--csa-num-groups", type=int, default=1)
-    parser.add_argument("--csa-window-size", type=int, default=32)
-    parser.add_argument("--csa-use-sink", action="store_true", default=True)
-    parser.add_argument("--csa-use-rope", action="store_true", default=True)
-    parser.add_argument("--csa-rope-dim", type=int, default=64)
+    parser.add_argument(
+        "--kv-dim", type=int, default=128, help="Compressed KV dimension for HCA/CSA"
+    )
+    parser.add_argument(
+        "--num-query-heads",
+        type=int,
+        default=8,
+        help="Number of query heads for HCA/CSA",
+    )
+    parser.add_argument(
+        "--compression-rate", type=int, default=8, help="Compression rate for HCA/CSA"
+    )
+    parser.add_argument(
+        "--num-groups",
+        type=int,
+        default=1,
+        help="Number of query head groups for HCA/CSA",
+    )
+    parser.add_argument(
+        "--group-out-dim", type=int, default=0, help="Output dim per group (0 = auto)"
+    )
+    parser.add_argument(
+        "--window-size",
+        type=int,
+        default=32,
+        help="Sliding window size for HCA/CSA (0 to disable)",
+    )
+    parser.add_argument(
+        "--use-attention-sink",
+        action="store_true",
+        default=True,
+        help="Use attention sink in HCA/CSA",
+    )
+    parser.add_argument(
+        "--use-partial-rope",
+        action="store_true",
+        default=True,
+        help="Use partial rotary pos emb in HCA/CSA",
+    )
+    parser.add_argument(
+        "--rope-dim", type=int, default=64, help="RoPE dimension for HCA/CSA"
+    )
+    parser.add_argument(
+        "--csa-top-k-blocks", type=int, default=32, help="Top-K blocks for CSA indexer"
+    )
+    parser.add_argument(
+        "--csa-indexer-dim",
+        type=int,
+        default=0,
+        help="CSA indexer dimension (0 = auto)",
+    )
 
     parser.add_argument(
         "--optimizer",

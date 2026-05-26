@@ -65,6 +65,7 @@ def main():
         zero_init_output=True,
         batched_experts=True,
         max_batch_size=16,
+        use_hca=True,
     )
 
     print("5. Train with the Trainer")

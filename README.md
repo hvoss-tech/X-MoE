@@ -1,55 +1,76 @@
+<div align="center">
+
 # X-MoE
 
-A Mixture of Experts wrapper around [x-transformers](https://github.com/lucidrains/x-transformers) for training state-of-the-art MoE language models.
-This project was primarily done because I really like the x-transformers library, but would like to easily add MoE training on top of it. This library enables exactly that.
+A Mixture of Experts wrapper around [x-transformers](https://github.com/lucidrains/x-transformers) for training state-of-the-art MoE language models with minimal code changes.
 
-X-MoE takes any x-transformers `Decoder` / `TransformerWrapper` model and replaces its feed-forward layers with MoE routing layers, giving you sparse, expert-driven architectures with minimal code changes. It ships with two routing strategies, custom DS4 attention mechanisms, the Muon optimizer, CUDA performance utilities, and a full-featured `Trainer`.
+<p>
+  <img src="https://img.shields.io/badge/Python-3.11+-blue" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/PyTorch-2.0+-ee4c2c" alt="PyTorch 2.0+" />
+  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License: MIT" />
+  <img src="https://img.shields.io/badge/CUDA-Required-76b900" alt="CUDA Required" />
+</p>
 
----
-
-## Features
-
-### Core MoE
-
-- **MoEFFN layer** — drop-in replacement for FFN layers with configurable experts, top-k routing, and capacity factor
-- **Two routing strategies** — `top_k` (tokens choose experts) and `expert_choice` (experts choose tokens)
-- **Auxiliary losses** — load balance loss and z-loss to prevent routing collapse, both with configurable weights
-- **Selective MoE placement** — replace every Nth FFN, or target specific layers by index
-- **Batched experts** — stack expert parameters into single tensors for a vectorized einsum-based forward pass
-
-### DS4 Attention (Dual-State Sparse Streaming)
-In addition to the MoE routing, I added deepseek CSA/HCA to the project as I wanted to play around with the new attention mechanisms a bit. This will probably be removed as soon as x-transformer implements this.
-
-- **HCA** (Heavily Compressed Attention) — KV compression with learned soft-merging, sliding window, and attention sinks
-- **CSA** (Compressed Sparse Attention) — overlapped block compression + top-K block retrieval via a learned indexer
-- **SharedKVMQA** — multi-query attention over a compressed KV cache with optional grouped output projections
-- **HybridAttentionBlock** — composable block combining HCA and/or CSA layers
-
-### Muon Optimizer
-
-- **Muon** — momentum optimizer using Newton-Schulz orthogonalization for 2D+ weight matrices
-- **MuonWithAdamW** — combined optimizer: Muon for 2D+ weights, AdamW for 1D params (biases, norms, embeddings, gates)
-- **Auto parameter classification** — `configure_muon_optimizer()` splits model parameters into the right groups
-
-### Performance Utilities
-
-- **DataPrefetcher** — CUDA-stream-based async data prefetching
-- **ThroughputLogger** — tokens/sec and step-time tracking with rolling window averaging
-- **CUDAGraphCapturer** — capture and replay CUDA graphs for fixed-shape training steps
-- **LR schedulers** — linear warmup + cosine decay, with a Muon-specific variant
-
-### Trainer
-
-- Full training loop powered by [HuggingFace Accelerate](https://github.com/huggingface/accelerate)
-- Multi-GPU, mixed precision (`bf16`/`fp16`), gradient accumulation
-- `torch.compile()` support and gradient checkpointing
-- Validation perplexity tracking and best-model checkpointing
-- `Trainer.load()` for resuming from checkpoint
-- Built-in `chat()` and `generate()` for interactive text generation
+</div>
 
 ---
 
-## Installation
+**You want to train a MoE model. You love x-transformers. You don't want to rewrite your entire codebase.**
+
+X-MoE takes any x-transformers `Decoder` / `TransformerWrapper` and replaces its feed-forward layers with sparse, expert-driven routing. Two lines of code and you're running a Mixture of Experts model.
+
+---
+
+## ✨ Features
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🧠 MoE Routing</h3>
+      <p>Drop-in <code>MoEFFN</code> layer, configurable experts, top-k routing, capacity factor. Two strategies: <b>top_k</b> (tokens choose) and <b>expert_choice</b> (experts choose).</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>⚖️ Auxiliary Losses</h3>
+      <p>Load balance loss + z-loss prevent routing collapse. Configurable weights, zero integration effort.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🎯 Selective Placement</h3>
+      <p>Replace every Nth FFN, or target specific layers by index. Put MoE where it matters.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>⚡ Batched Experts</h3>
+      <p>Stack expert parameters into single tensors for vectorized einsum-based forward passes. No loops, no overhead.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🔬 DS4 Attention</h3>
+      <p>Heavily Compressed Attention (HCA) + Compressed Sparse Attention (CSA) + SharedKVMQA. composable via <code>HybridAttentionBlock</code>.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>🚀 Muon Optimizer</h3>
+      <p>Newton-Schulz orthogonalization for 2D+ weights. <code>MuonWithAdamW</code> auto-splits params, Muon for matrices, AdamW for the rest.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🔧 CUDA Utilities</h3>
+      <p>Async <code>DataPrefetcher</code>, <code>ThroughputLogger</code>, <code>CUDAGraphCapturer</code>, squeeze every token/second out of your hardware.</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>🏋️ Trainer</h3>
+      <p>Full training loop powered by HuggingFace Accelerate. Multi-GPU, mixed precision, gradient checkpointing, <code>torch.compile()</code>, and built-in <code>chat()</code>.</p>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🚀 Quick Start
+
+### Installation
 
 Requires Python >= 3.11 and a CUDA-capable PyTorch install.
 
@@ -65,11 +86,7 @@ uv sync
 pip install -e ".[dev]"
 ```
 
----
-
-## Quick Start
-
-### Train with the Trainer API
+### Train a model
 
 ```python
 from datasets import load_dataset
@@ -89,7 +106,7 @@ tokenizer = train_tokenizer(train_texts, vocab_size=4096, save_path="tokenizer.j
 train_ds = TextDataset(train_texts, tokenizer, max_seq_len=256)
 val_ds = TextDataset(val_texts, tokenizer, max_seq_len=256)
 
-# 4. Build the model
+# 4. Build the model from x-transformer
 decoder = Decoder(
     dim=256, depth=12, heads=8,
     ff_glu=True, ff_mult=4,
@@ -101,6 +118,7 @@ transformer = TransformerWrapper(
     attn_layers=decoder,
     tie_embedding=True, use_abs_pos_emb=False,
 )
+# 5. Add the MoE Wrapper
 model = MoETransformerWrapper(
     transformer=transformer,
     num_experts=32,
@@ -110,7 +128,7 @@ model = MoETransformerWrapper(
     z_loss_weight=1e-4,
 )
 
-# 5. Train
+# 6. Train
 trainer = Trainer(
     model=model, tokenizer=tokenizer,
     train_dataset=train_ds, val_dataset=val_ds,
@@ -119,7 +137,7 @@ trainer = Trainer(
 trainer.train()
 trainer.save()
 
-# 6. Load and generate
+# 7. Load and generate
 trainer = Trainer.load("checkpoints/best_model.pt", tokenizer=tokenizer)
 print(trainer.chat("Once upon a time"))
 ```
@@ -137,7 +155,28 @@ python examples/generate.py \
 
 ---
 
-## Citations
+## 🔧 Under the Hood
+
+### How MoE wraps x-transformers
+
+X-MoE wraps x-transformers. `MoETransformerWrapper` takes your existing `TransformerWrapper`, walks its layers, and replaces FFN modules with `MoEFFN` instances based on your placement config (every Nth layer, or specific indices). All expert parameters are batched into single tensors for vectorized forward passes.
+
+The routing strategies differ in who initiates selection:
+
+- **top_k** - each token chooses its top-k experts. Classic GShard/Switch-style routing.
+- **expert_choice** - each expert chooses its top-k tokens. Better load balancing, inspired by Expert Choice Routing.
+
+Both strategies support auxiliary losses (load balance + z-loss) that feed into the training loss automatically via `collect_moe_aux_loss()`.
+
+### DS4 Attention
+
+HCA and CSA implement the dual-state attention from DeepSeek-V4. HCA compresses the KV cache with learned soft-merging and sliding windows. CSA adds overlapped block compression + top-K block retrieval via a learned indexer. They compose into a `HybridAttentionBlock` so you can mix and match within the same model.
+
+> **Note:** This is an experimental addition and will likely be removed if x-transformers implements it natively.
+
+---
+
+## 📄 Citation
 
 ```bibtex
 @misc{deepseekai2026deepseekv4,
@@ -146,3 +185,7 @@ python examples/generate.py \
       year={2026},
 }
 ```
+
+<p align="center">
+  MIT License &copy; <a href="https://github.com/hvoss-techfak">hvoss-techfak</a>
+</p>

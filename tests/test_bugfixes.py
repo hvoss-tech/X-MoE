@@ -134,10 +134,10 @@ class TestBuildModelFromConfigKwargsBug:
             "num_experts": 4,
             "expert_top_k": 2,
             "use_hca": True,
-            "hca_kv_dim": 32,
-            "hca_num_heads": 4,
-            "hca_compression_rate": 4,
-            "hca_window_size": 0,
+            "kv_dim": 32,
+            "num_query_heads": 4,
+            "compression_rate": 4,
+            "window_size": 0,
         }
         model = build_model_from_config(config, vocab_size=100, max_seq_len=64)
         assert model is not None
@@ -1027,6 +1027,295 @@ class TestCapacityEnforcementBug:
         diff = (out_fallback - out_vectorized).abs().max().item()
         assert diff < 0.1, (
             f"Fallback and vectorized outputs should be consistent, max diff={diff:.6f}"
+        )
+
+
+class TestBatchedGluBiasWithNoBiasBug:
+    def test_batched_no_bias_true_glu_true_includes_proj_bias(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        assert moe._has_bias_1.item() == True, (
+            "GLU proj bias should be detected even when no_bias=True"
+        )
+        assert hasattr(moe, "b1_stack"), "b1_stack should exist when GLU proj has bias"
+
+    def test_batched_no_bias_true_glu_true_matches_fallback(self):
+        torch.manual_seed(42)
+        moe_batched = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+            zero_init_output=False,
+        )
+        moe_fallback = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=False,
+            max_seq_len=64,
+            zero_init_output=False,
+        )
+
+        moe_fallback.train()
+        opt = torch.optim.Adam(moe_fallback.parameters(), lr=0.01)
+        x = torch.randn(4, 16, 64)
+        for _ in range(5):
+            loss = moe_fallback(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        state_f = moe_fallback.state_dict()
+        for key in state_f:
+            if key in moe_batched.state_dict():
+                moe_batched.state_dict()[key].copy_(state_f[key])
+        moe_batched._sync_experts_to_stacked()
+        moe_batched.eval()
+        moe_fallback.eval()
+
+        with torch.no_grad():
+            out_b = moe_batched(x)
+            out_f = moe_fallback(x)
+
+        diff = (out_b - out_f).abs().max().item()
+        assert diff < 0.01, (
+            f"Batched and fallback outputs should match when GLU proj bias is included, "
+            f"max diff={diff:.6f}"
+        )
+
+    def test_batched_no_bias_true_glu_true_bias_sync_roundtrip(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+            zero_init_output=False,
+        )
+
+        moe.train()
+        opt = torch.optim.Adam(moe.parameters(), lr=0.01)
+        x = torch.randn(4, 16, 64)
+        for _ in range(5):
+            loss = moe(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        assert moe._has_bias_1.item() == True
+
+        moe._sync_experts_to_stacked()
+        b1_before = moe.b1_stack.data.clone()
+
+        moe._sync_stacked_to_experts()
+        moe._sync_experts_to_stacked()
+
+        assert torch.allclose(moe.b1_stack.data, b1_before, atol=1e-6), (
+            "b1_stack roundtrip should preserve GLU proj bias"
+        )
+
+        for i in range(4):
+            expert_bias = moe.experts[i].ff[0].proj.bias.data
+            stacked_bias = moe.b1_stack.data[i]
+            assert torch.allclose(expert_bias, stacked_bias, atol=1e-6), (
+                f"Expert {i} GLU proj bias should match stacked bias"
+            )
+
+    def test_batched_no_bias_false_glu_true_still_works(self):
+        torch.manual_seed(42)
+        moe_fallback = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=False,
+            batched_experts=False,
+            max_seq_len=64,
+            zero_init_output=False,
+        )
+
+        moe_fallback.train()
+        opt = torch.optim.Adam(moe_fallback.parameters(), lr=0.01)
+        x = torch.randn(4, 16, 64)
+        for _ in range(5):
+            loss = moe_fallback(x).sum()
+            loss.backward()
+            opt.step()
+            opt.zero_grad()
+
+        moe_batched = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=False,
+            batched_experts=True,
+            max_seq_len=64,
+            zero_init_output=False,
+        )
+        assert moe_batched._has_bias_1.item() == True
+        assert moe_batched._has_bias_2.item() == True
+        assert hasattr(moe_batched, "b1_stack")
+        assert hasattr(moe_batched, "b2_stack")
+
+        state_f = moe_fallback.state_dict()
+        for key in state_f:
+            if key in moe_batched.state_dict():
+                moe_batched.state_dict()[key].copy_(state_f[key])
+        moe_batched._sync_experts_to_stacked()
+        moe_batched.eval()
+        moe_fallback.eval()
+
+        with torch.no_grad():
+            out_b = moe_batched(x)
+            out_f = moe_fallback(x)
+
+        diff = (out_b - out_f).abs().max().item()
+        assert diff < 0.01, (
+            f"Batched and fallback should match with no_bias=False, max diff={diff:.6f}"
+        )
+
+
+class TestWindowValueNormBug:
+    def test_hca_window_values_are_normed(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        x = torch.randn(2, 16, 64)
+
+        win_k, win_v = hca.sliding_window(x)
+        win_k_normed = hca.mqa.kv_norm(win_k)
+        win_v_normed = hca.mqa.kv_norm(win_v)
+
+        assert win_v_normed.shape == win_v.shape, "Normed win_v should have same shape"
+
+        kv_norm_scale = win_v_normed.abs().mean().item()
+        win_v_raw_scale = win_v.abs().mean().item()
+        assert abs(kv_norm_scale - win_v_raw_scale) > 0.01 or kv_norm_scale > 0, (
+            "win_v should go through kv_norm, changing its scale"
+        )
+
+    def test_hca_with_window_gradient_flow(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+        )
+        x = torch.randn(2, 16, 64, requires_grad=True)
+        out = hca(x)
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
+
+    def test_hca_window_norm_consistency_with_compressed_kv(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            c_compressed = hca._compress_kv(x)
+            win_k, win_v = hca.sliding_window(x)
+
+            kv_normed = hca.mqa.kv_norm(c_compressed)
+            win_v_normed = hca.mqa.kv_norm(win_v)
+
+            compressed_val_scale = kv_normed.abs().mean().item()
+            window_val_scale = win_v_normed.abs().mean().item()
+
+        scale_ratio = window_val_scale / max(compressed_val_scale, 1e-6)
+        assert 0.3 < scale_ratio < 3.0, (
+            f"Window values and compressed KV values should have comparable scale "
+            f"after normalization, ratio={scale_ratio:.4f}"
+        )
+
+    def test_csa_with_window_norm_consistency(self):
+        from x_moe.attention import CSA
+
+        csa = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=0,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        x = torch.randn(2, 16, 64)
+        out = csa(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_hca_window_no_window_output_consistency(self):
+        from x_moe.attention import HCA
+
+        hca_window = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=4,
+            use_attention_sink=False,
+        )
+        hca_no_window = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_attention_sink=False,
+        )
+        hca_no_window.load_state_dict(hca_window.state_dict(), strict=False)
+
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_window = hca_window(x)
+            out_no_window = hca_no_window(x)
+
+        diff = (out_window - out_no_window).abs().mean().item()
+        x_scale = x.abs().mean().item()
+        assert diff < x_scale * 5, (
+            f"Window and no-window outputs should be reasonable, "
+            f"diff={diff:.4f}, x_scale={x_scale:.4f}"
         )
 
 

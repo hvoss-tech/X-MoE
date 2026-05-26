@@ -18,15 +18,22 @@ from x_moe import (
     collect_moe_aux_loss,
     reset_moe_aux_loss,
 )
+from x_moe.attention import HybridAttentionBlock as _HAB
 
 
 class TestMoEWrapper:
     def test_basic_forward(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         x = torch.randint(0, 100, (2, 32))
         loss = model(x)
@@ -35,10 +42,16 @@ class TestMoEWrapper:
 
     def test_generate(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         model.eval()
         prompt = torch.randint(0, 100, (1, 5))
@@ -47,10 +60,16 @@ class TestMoEWrapper:
 
     def test_aux_loss(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         x = torch.randint(0, 100, (2, 32))
         model(x)
@@ -61,11 +80,18 @@ class TestMoEWrapper:
 
     def test_expert_choice(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            routing_strategy="expert_choice", capacity_factor=1.0,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         x = torch.randint(0, 100, (2, 32))
         loss = model(x)
@@ -73,20 +99,33 @@ class TestMoEWrapper:
 
     def test_moe_layers_param(self):
         decoder = Decoder(dim=64, depth=4, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            moe_layers=[0, 3], glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            moe_layers=[0, 3],
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         moe_count = sum(1 for m in model.modules() if isinstance(m, MoEFFN))
         assert moe_count == 2
 
     def test_backward(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         x = torch.randint(0, 100, (2, 32))
         loss = model(x)
@@ -97,51 +136,116 @@ class TestMoEWrapper:
 
 
 class TestDS4Integration:
-    def test_wrapper_with_ds4(self):
-        from x_moe.attention import HybridAttentionBlock
+    def test_wrapper_with_hca(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
-        ds4_block = HybridAttentionBlock(
-            dim=64,
-            hca_config={"kv_dim": 32, "num_query_heads": 4, "compression_rate": 4, "window_size": 0},
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
         )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
-            ds4_attention=ds4_block,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            use_hca=True,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
         )
         x = torch.randint(0, 100, (2, 16))
         loss = model(x)
         assert not torch.isnan(loss)
 
-    def test_ds4_with_moe_backward(self):
-        from x_moe.attention import HybridAttentionBlock
+    def test_wrapper_with_csa(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
-        ds4_block = HybridAttentionBlock(
-            dim=64,
-            hca_config={"kv_dim": 32, "num_query_heads": 4, "compression_rate": 4, "window_size": 0},
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
         )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
-            ds4_attention=ds4_block,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            use_csa=True,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            csa_top_k_blocks=0,
+            window_size=0,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        loss = model(x)
+        assert not torch.isnan(loss)
+
+    def test_wrapper_with_hca_and_csa(self):
+        decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
+        model = MoETransformerWrapper(
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            use_hca=True,
+            use_csa=True,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            csa_top_k_blocks=0,
+            window_size=0,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        loss = model(x)
+        assert not torch.isnan(loss)
+
+    def test_hca_with_moe_backward(self):
+        decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
+        model = MoETransformerWrapper(
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            use_hca=True,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
         )
         x = torch.randint(0, 100, (2, 16))
         loss = model(x)
         loss.backward()
-        has_valid_grads = any(p.grad is not None and not torch.isnan(p.grad).any()
-                              for p in model.parameters())
+        has_valid_grads = any(
+            p.grad is not None and not torch.isnan(p.grad).any()
+            for p in model.parameters()
+        )
         assert has_valid_grads
 
 
 class TestOptimizerIntegration:
     def test_muon_training_step(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         muon_opt, adamw_opt = configure_muon_optimizer(model, lr=1e-3)
         combo = MuonWithAdamW(muon_opt, adamw_opt)
@@ -156,10 +260,16 @@ class TestOptimizerIntegration:
 
     def test_full_training_loop(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         muon_opt, adamw_opt = configure_muon_optimizer(model, lr=1e-4, adamw_lr=1e-4)
         combo = MuonWithAdamW(muon_opt, adamw_opt)
@@ -185,10 +295,16 @@ import math
 class TestEndToEnd:
     def test_moe_only_training(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
         x = torch.randint(0, 100, (2, 16))
@@ -200,30 +316,34 @@ class TestEndToEnd:
             opt.step()
             opt.zero_grad()
         final_loss = model(x).item()
-        assert final_loss < initial_loss, f"Loss did not decrease: {initial_loss:.4f} -> {final_loss:.4f}"
+        assert final_loss < initial_loss, (
+            f"Loss did not decrease: {initial_loss:.4f} -> {final_loss:.4f}"
+        )
 
     def test_model_param_count(self):
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
-        transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
+        transformer = TransformerWrapper(
+            num_tokens=100, max_seq_len=64, attn_layers=decoder
+        )
         model = MoETransformerWrapper(
-            transformer=transformer, num_experts=4, expert_top_k=2,
-            glu=True, mult=4, no_bias=True,
+            transformer=transformer,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
         )
         assert model.num_params > 0
         assert model.num_trainable_params == model.num_params
 
     def test_replace_attention_standalone(self):
-        from x_moe.attention import HybridAttentionBlock
         decoder = Decoder(dim=64, depth=2, heads=4, ff_glu=True, rotary_pos_emb=True)
         transformer = TransformerWrapper(num_tokens=100, max_seq_len=64, attn_layers=decoder)
-        ds4_block = HybridAttentionBlock(
-            dim=64,
-            hca_config={"kv_dim": 32, "num_query_heads": 4, "compression_rate": 4, "window_size": 0},
-        )
         model = MoETransformerWrapper(
             transformer=transformer, num_experts=4, expert_top_k=2,
             glu=True, mult=4, no_bias=True,
-            ds4_attention=ds4_block,
+            use_hca=True, kv_dim=32, num_query_heads=4,
+            compression_rate=4, window_size=0,
         )
         ds4_count = sum(1 for m in model.modules() if isinstance(m, (DS4AttentionLayer, HybridAttentionBlock)))
         assert ds4_count >= 1

@@ -141,8 +141,9 @@ class SharedKVMQA(nn.Module):
 
         if win_k is not None and win_v is not None:
             win_k_n = self.kv_norm(win_k)
+            win_v_n = self.kv_norm(win_v)
             win_k_exp = win_k_n.unsqueeze(2).expand(-1, -1, self.num_query_heads, -1)
-            win_v_exp = win_v.unsqueeze(2).expand(-1, -1, self.num_query_heads, -1)
+            win_v_exp = win_v_n.unsqueeze(2).expand(-1, -1, self.num_query_heads, -1)
             keys = torch.cat([keys, win_k_exp], dim=1)
             values = torch.cat([values, win_v_exp], dim=1)
 

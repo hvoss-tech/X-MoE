@@ -160,36 +160,31 @@ class MoEFFN(nn.Module):
                     self.w1_stack.data[i] = ff_seq[0][0].weight.data
                 self.w2_stack.data[i] = ff_seq[2].weight.data
 
-        if not self._no_bias:
-            if self._glu:
-                b1_exists = any(
-                    expert.ff[0].proj.bias is not None for expert in self.experts
-                )
-            else:
-                b1_exists = any(
-                    expert.ff[0][0].bias is not None for expert in self.experts
-                )
-            b2_exists = any(expert.ff[2].bias is not None for expert in self.experts)
-            if b1_exists:
-                self.b1_stack = nn.Parameter(
-                    torch.empty(self.num_experts, proj_out_dim)
-                )
-                self._has_bias_1.fill_(True)
-                with torch.no_grad():
-                    for i, expert in enumerate(self.experts):
-                        if self._glu:
-                            if expert.ff[0].proj.bias is not None:
-                                self.b1_stack.data[i] = expert.ff[0].proj.bias.data
-                        else:
-                            if expert.ff[0][0].bias is not None:
-                                self.b1_stack.data[i] = expert.ff[0][0].bias.data
-            if b2_exists:
-                self.b2_stack = nn.Parameter(torch.empty(self.num_experts, self.dim))
-                self._has_bias_2.fill_(True)
-                with torch.no_grad():
-                    for i, expert in enumerate(self.experts):
-                        if expert.ff[2].bias is not None:
-                            self.b2_stack.data[i] = expert.ff[2].bias.data
+        if self._glu:
+            b1_exists = any(
+                expert.ff[0].proj.bias is not None for expert in self.experts
+            )
+        else:
+            b1_exists = any(expert.ff[0][0].bias is not None for expert in self.experts)
+        b2_exists = any(expert.ff[2].bias is not None for expert in self.experts)
+        if b1_exists:
+            self.b1_stack = nn.Parameter(torch.empty(self.num_experts, proj_out_dim))
+            self._has_bias_1.fill_(True)
+            with torch.no_grad():
+                for i, expert in enumerate(self.experts):
+                    if self._glu:
+                        if expert.ff[0].proj.bias is not None:
+                            self.b1_stack.data[i] = expert.ff[0].proj.bias.data
+                    else:
+                        if expert.ff[0][0].bias is not None:
+                            self.b1_stack.data[i] = expert.ff[0][0].bias.data
+        if b2_exists:
+            self.b2_stack = nn.Parameter(torch.empty(self.num_experts, self.dim))
+            self._has_bias_2.fill_(True)
+            with torch.no_grad():
+                for i, expert in enumerate(self.experts):
+                    if expert.ff[2].bias is not None:
+                        self.b2_stack.data[i] = expert.ff[2].bias.data
 
         try:
             self._dropout_p = self.experts[0].ff[1].p
