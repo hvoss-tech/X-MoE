@@ -83,6 +83,12 @@ def build_model_from_config(
         attn_dropout=model_config.get("attn_dropout", 0.0),
         csa_top_k_blocks=model_config.get("csa_top_k_blocks", 32),
         csa_indexer_dim=model_config.get("csa_indexer_dim", None),
+        sigmoid_routing=model_config.get("sigmoid_routing", False),
+        num_shared_experts=model_config.get("num_shared_experts", 0),
+        granularity_factor=model_config.get("granularity_factor", 1),
+        aux_loss_free=model_config.get("aux_loss_free", False),
+        bias_update_speed=model_config.get("bias_update_speed", 0.01),
+        seq_balance_loss_weight=model_config.get("seq_balance_loss_weight", 0.0),
     )
 
     return model
@@ -169,6 +175,30 @@ class Trainer:
         if self.accelerator is not None:
             return self.accelerator.unwrap_model(self.model)
         return self.model
+
+    def release(self):
+        if self.accelerator is not None:
+            self.accelerator.free_memory()
+        del self.model
+        del self.optimizer
+        del self.scheduler
+        del self.muon_scheduler
+        del self.adamw_scheduler
+        del self.train_loader
+        del self.val_loader
+        del self._muon_opt
+        del self._adamw_opt
+        self.model = None
+        self.optimizer = None
+        self.scheduler = None
+        self.muon_scheduler = None
+        self.adamw_scheduler = None
+        self.train_loader = None
+        self.val_loader = None
+        self._muon_opt = None
+        self._adamw_opt = None
+        self.accelerator = None
+        torch.cuda.empty_cache()
 
     def _setup(self):
         cfg = self.config
@@ -404,7 +434,7 @@ class Trainer:
                 f"Train PPL: {train_ppl:.2f} | Time: {epoch_time:.1f}s"
             )
             if perf_summary:
-                total_tokens += perf_summary['total_tokens']
+                total_tokens += perf_summary["total_tokens"]
                 accelerator.print(
                     f"Throughput: {perf_summary['tokens_per_sec']:.0f} tokens/s | "
                     f"{total_tokens} tokens total"

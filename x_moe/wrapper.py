@@ -27,6 +27,12 @@ def replace_ffn_with_moe(
     batched_experts: bool = False,
     max_seq_len: int = 256,
     max_batch_size: int = 1,
+    sigmoid_routing: bool = False,
+    num_shared_experts: int = 0,
+    granularity_factor: int = 1,
+    aux_loss_free: bool = False,
+    bias_update_speed: float = 0.01,
+    seq_balance_loss_weight: float = 0.0,
 ) -> nn.Module:
     attn_layers = None
     if hasattr(model, "attn_layers"):
@@ -72,6 +78,12 @@ def replace_ffn_with_moe(
                 batched_experts=batched_experts,
                 max_seq_len=max_seq_len,
                 max_batch_size=max_batch_size,
+                sigmoid_routing=sigmoid_routing,
+                num_shared_experts=num_shared_experts,
+                granularity_factor=granularity_factor,
+                aux_loss_free=aux_loss_free,
+                bias_update_speed=bias_update_speed,
+                seq_balance_loss_weight=seq_balance_loss_weight,
             )
             attn_layers.layers[idx][1] = moe
         ffn_count += 1
@@ -149,6 +161,12 @@ class MoETransformerWrapper(nn.Module):
         attn_dropout: Dropout rate for HCA/CSA attention. Shared by both. Default: 0.0.
         csa_top_k_blocks: Number of top-K blocks to select in CSA indexer. CSA-only. Default: 32.
         csa_indexer_dim: Dimension of the CSA block indexer projections. CSA-only. Default: None (dim // 4).
+        sigmoid_routing: Deepkseekv3 - use sigmoid for routing instead of softmax.
+        num_shared_experts: Deepkseekv3 - Add shared experts that always receive all tokens.
+        granularity_factor: DeepSeekMoE - Splits each expert into m smaller sub-experts (inner_dim divided by granularity_factor), activating top_k * m sub-experts for more combinatorial flexibility.
+        aux_loss_free: Deepseekv3 - Auxiliary-Loss-Free Load Balancing - only the seq balance loss is computed. IMPORTANT: Call model.update_routing_biases() after each optimizer step, so overloaded experts get bias decreased, underloaded get bias increased.
+        bias_update_speed: Deepseekv3 - Speed of bias adjustments.
+        seq_balance_loss_weight: Deepseekv3 - Weight of the sequence balance loss.
     """
 
     def __init__(
@@ -184,6 +202,12 @@ class MoETransformerWrapper(nn.Module):
         attn_dropout: float = 0.0,
         csa_top_k_blocks: int = 32,
         csa_indexer_dim: Optional[int] = None,
+        sigmoid_routing: bool = False,
+        num_shared_experts: int = 0,
+        granularity_factor: int = 1,
+        aux_loss_free: bool = False,
+        bias_update_speed: float = 0.01,
+        seq_balance_loss_weight: float = 0.0,
     ):
         super().__init__()
 
@@ -205,6 +229,20 @@ class MoETransformerWrapper(nn.Module):
                 f"moe_layers must contain non-negative indices, got {moe_layers}"
             )
         assert mult > 0, f"mult must be positive, got {mult}"
+        assert granularity_factor >= 1, (
+            f"granularity_factor must be >= 1, got {granularity_factor}"
+        )
+        assert num_shared_experts >= 0, (
+            f"num_shared_experts must be >= 0, got {num_shared_experts}"
+        )
+        if granularity_factor > 1 and num_shared_experts > 0:
+            effective_top_k = expert_top_k * granularity_factor
+            assert effective_top_k > num_shared_experts, (
+                f"expert_top_k*granularity_factor ({effective_top_k}) must be > "
+                f"num_shared_experts ({num_shared_experts})"
+            )
+        if aux_loss_free:
+            assert seq_balance_loss_weight > 0, (f"if aux_loss_free is set, seq_balance_loss_weight must be > 0")
 
         if use_hca or use_csa:
             assert kv_dim > 0, f"kv_dim must be positive, got {kv_dim}"
@@ -259,6 +297,12 @@ class MoETransformerWrapper(nn.Module):
             batched_experts=batched_experts,
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
+            sigmoid_routing=sigmoid_routing,
+            num_shared_experts=num_shared_experts,
+            granularity_factor=granularity_factor,
+            aux_loss_free=aux_loss_free,
+            bias_update_speed=bias_update_speed,
+            seq_balance_loss_weight=seq_balance_loss_weight,
         )
 
         self.num_experts = num_experts
@@ -266,6 +310,12 @@ class MoETransformerWrapper(nn.Module):
         self.routing_strategy = routing_strategy
         self.use_hca = use_hca
         self.use_csa = use_csa
+        self.sigmoid_routing = sigmoid_routing
+        self.num_shared_experts = num_shared_experts
+        self.granularity_factor = granularity_factor
+        self.aux_loss_free = aux_loss_free
+        self.bias_update_speed = bias_update_speed
+        self.seq_balance_loss_weight = seq_balance_loss_weight
         self._gradient_checkpointing = False
 
         attn_layers = (
@@ -322,6 +372,12 @@ class MoETransformerWrapper(nn.Module):
             "attn_dropout": attn_dropout,
             "csa_top_k_blocks": csa_top_k_blocks,
             "csa_indexer_dim": csa_indexer_dim,
+            "sigmoid_routing": sigmoid_routing,
+            "num_shared_experts": num_shared_experts,
+            "granularity_factor": granularity_factor,
+            "aux_loss_free": aux_loss_free,
+            "bias_update_speed": bias_update_speed,
+            "seq_balance_loss_weight": seq_balance_loss_weight,
         }
 
         self.ds4_attention = None
@@ -381,6 +437,11 @@ class MoETransformerWrapper(nn.Module):
 
     def set_aux_loss_compute(self, compute: bool):
         set_aux_loss_compute(self, compute)
+
+    def update_routing_biases(self):
+        for module in self.modules():
+            if isinstance(module, MoEFFN):
+                module.update_routing_bias()
 
     def enable_gradient_checkpointing(self):
         self._gradient_checkpointing = True

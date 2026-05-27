@@ -66,6 +66,7 @@ def main():
         batched_experts=True,
         max_batch_size=16,
         use_hca=True,
+        sigmoid_routing=True
     )
 
     print("5. Train with the Trainer")
@@ -89,6 +90,7 @@ def main():
     trainer.save()
 
     print("7. Load from checkpoint and chat")
+    trainer.release()
     trainer = Trainer.load("checkpoints/best_model.pt", tokenizer=tokenizer)
     print(trainer.chat("Once upon a time"))
 
