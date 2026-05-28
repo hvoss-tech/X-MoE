@@ -1,3 +1,4 @@
+import math
 import pytest
 import torch
 import torch.nn as nn
@@ -1819,3 +1820,269 @@ class TestRoutingBiasUpdateConsistency:
             model(x)
             model.update_routing_biases()
             model.reset_moe_aux_loss()
+
+
+class TestHashGateDegenerateHashBug:
+    def test_hash_gate_different_ids_different_routing(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=8, top_k=2, num_hash_functions=4)
+        x = torch.randn(100, 64)
+        ids_a = torch.arange(0, 100)
+        ids_b = torch.arange(100, 200)
+        _, idx_a, _ = gate(x, token_ids=ids_a)
+        _, idx_b, _ = gate(x, token_ids=ids_b)
+        assert not torch.equal(idx_a, idx_b), (
+            "Different token IDs should produce different routing"
+        )
+
+    def test_hash_gate_no_degenerate_seed(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=8, top_k=2, num_hash_functions=4)
+        x = torch.randn(100, 64)
+        token_ids = torch.arange(0, 100)
+        _, indices, _ = gate(x, token_ids=token_ids)
+        for k in range(indices.shape[1]):
+            unique_experts = indices[:, k].unique()
+            assert len(unique_experts) > 1, (
+                f"Hash function k={k} routes all tokens to same expert (degenerate)"
+            )
+
+    def test_hash_gate_reasonable_distribution(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=8, top_k=2, num_hash_functions=4)
+        x = torch.randn(1000, 64)
+        token_ids = torch.arange(0, 1000)
+        _, indices, _ = gate(x, token_ids=token_ids)
+        all_indices = indices.reshape(-1)
+        counts = all_indices.bincount(minlength=8)
+        min_count = counts.min().item()
+        max_count = counts.max().item()
+        assert max_count < 3 * min_count + 1, (
+            f"Hash routing distribution too skewed: min={min_count}, max={max_count}"
+        )
+
+    def test_hash_gate_forced_degenerate_seed(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=8, top_k=2, num_hash_functions=4)
+        gate.hash_seeds[0] = 8  # 8 % 8 == 0, would be degenerate with old code
+        gate.hash_seeds[1] = 16  # 16 % 8 == 0, would be degenerate with old code
+        x = torch.randn(100, 64)
+        token_ids = torch.arange(0, 100)
+        _, indices, _ = gate(x, token_ids=token_ids)
+        for k in range(min(2, indices.shape[1])):
+            unique_experts = indices[:, k].unique()
+            assert len(unique_experts) > 1, (
+                f"Seed that is multiple of num_experts should not cause degenerate routing, k={k}"
+            )
+
+
+class TestExpertChoiceTokenCountsBug:
+    def test_expert_choice_token_counts_correct_total(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        assert hasattr(moe, "_token_counts"), (
+            "_token_counts should exist after expert_choice forward with aux_loss_free"
+        )
+        total = moe._token_counts.sum().item()
+        num_tokens = 2 * 16
+        capacity = max(1, int(1.0 * num_tokens / 4))
+        expected_total = 4 * capacity
+        assert total == expected_total, (
+            f"Token counts total should equal num_experts*capacity={expected_total}, got {total}"
+        )
+
+    def test_expert_choice_token_counts_per_expert(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        for i in range(4):
+            count = moe._token_counts[i].item()
+            assert count > 0, (
+                f"Expert {i} should have processed some tokens, got {count}"
+            )
+
+    def test_expert_choice_bias_update_direction(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        torch.manual_seed(42)
+        for _ in range(3):
+            x = torch.randn(2, 16, 64)
+            moe(x)
+        bias_before = moe.gate.routing_bias.clone()
+        moe.update_routing_bias()
+        bias_after = moe.gate.routing_bias
+        if moe._token_counts.sum().item() > 0:
+            counts = moe._token_counts.float()
+            total = counts.sum().item()
+            avg = total / moe.num_routed_experts
+            for i in range(moe.num_routed_experts):
+                if counts[i].item() > avg:
+                    assert bias_after[i].item() <= bias_before[i].item(), (
+                        f"Overloaded expert {i} bias should decrease, "
+                        f"before={bias_before[i].item()}, after={bias_after[i].item()}"
+                    )
+                elif counts[i].item() < avg:
+                    assert bias_after[i].item() >= bias_before[i].item(), (
+                        f"Underloaded expert {i} bias should increase, "
+                        f"before={bias_before[i].item()}, after={bias_after[i].item()}"
+                    )
+
+
+class TestSeqBalanceLossTopKBug:
+    def test_seq_balance_loss_top_k_2_correct(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 4
+        num_tokens = 8
+        top_k = 2
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+        assert loss.shape == ()
+
+    def test_seq_balance_loss_top_k_1_correct(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 4
+        num_tokens = 8
+        top_k = 1
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens,))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+    def test_seq_balance_loss_top_k_2_with_padding(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 5
+        num_tokens = 7
+        top_k = 2
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+    def test_seq_balance_loss_top_k_2_uses_all_tokens(self):
+        from x_moe.moe import _compute_seq_balance_loss
+        import torch.nn.functional as F
+
+        num_experts = 4
+        num_tokens_per_seq = 8
+        num_tokens = 16
+        top_k = 2
+
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+
+        one_hot = F.one_hot(top_indices.reshape(-1), num_experts).float()
+        one_hot_per_token = one_hot.reshape(num_tokens, top_k, num_experts).sum(dim=1)
+        assert one_hot_per_token.shape[0] == num_tokens, (
+            "All tokens should be accounted for in seq balance loss"
+        )
+        total_assignments = one_hot_per_token.sum().item()
+        assert abs(total_assignments - num_tokens * top_k) < 1e-6, (
+            f"Total assignments should be num_tokens*top_k={num_tokens * top_k}, "
+            f"got {total_assignments}"
+        )
+
+    def test_seq_balance_loss_top_k_2_non_divisible(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 7
+        num_tokens = 15
+        top_k = 2
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+    def test_seq_balance_loss_with_moe_top_k_2(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            seq_balance_loss_weight=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 8, 64)
+        moe(x)
+        aux = moe.aux_loss.item()
+        assert aux >= 0, f"Aux loss should be non-negative, got {aux}"
+        assert not math.isnan(aux), "Aux loss should not be NaN"
+
+    def test_seq_balance_loss_top_k_gt1_different_from_topk1(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 4
+        num_tokens = 8
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices_k1 = torch.randint(0, num_experts, (num_tokens,))
+        top_indices_k2 = torch.cat(
+            [
+                top_indices_k1.unsqueeze(-1),
+                torch.randint(0, num_experts, (num_tokens, 1)),
+            ],
+            dim=-1,
+        )
+        loss_k1 = _compute_seq_balance_loss(
+            router_logits, top_indices_k1, num_experts, num_tokens_per_seq
+        )
+        loss_k2 = _compute_seq_balance_loss(
+            router_logits, top_indices_k2, num_experts, num_tokens_per_seq
+        )
+        assert not torch.isnan(loss_k1)
+        assert not torch.isnan(loss_k2)

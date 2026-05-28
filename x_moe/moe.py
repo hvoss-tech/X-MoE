@@ -139,7 +139,8 @@ class HashGate(nn.Module):
             )
             for k in range(top_k):
                 seed = self.hash_seeds[k % self.num_hash_functions].item()
-                hashed = (flat_ids * seed) % self.num_experts
+                h = (flat_ids ^ seed) * (seed | 1)
+                hashed = h % self.num_experts
                 top_indices[:, k] = hashed
         else:
             logits = self.w_g(x)
@@ -193,6 +194,7 @@ def _compute_seq_balance_loss(
     router_probs = F.softmax(logits_2d, dim=-1)
     with torch.no_grad():
         one_hot = F.one_hot(top_indices.reshape(-1), num_experts).float()
+        one_hot = one_hot.reshape(num_tokens, top_k, num_experts).sum(dim=1)
     padded_tokens = num_seqs * num_tokens_per_seq
     if num_tokens < padded_tokens:
         one_hot = F.pad(one_hot, (0, 0, 0, padded_tokens - num_tokens))
@@ -885,10 +887,14 @@ class MoEFFN(nn.Module):
         )
 
         if apply_bias:
-            all_selected = top_indices.reshape(-1)
-            valid_mask = (all_selected >= 0) & (all_selected < num_tokens)
-            valid_indices = all_selected[valid_mask]
-            self._update_token_counts(valid_indices.unsqueeze(-1), num_tokens)
+            expert_counts = torch.zeros(
+                self.num_routed_experts, dtype=torch.long, device=x.device
+            )
+            for expert_idx in range(self.num_routed_experts):
+                selected = top_indices[expert_idx]
+                valid = (selected >= 0) & (selected < num_tokens)
+                expert_counts[expert_idx] = valid.sum().item()
+            self._update_token_counts_from_counts(expert_counts)
 
         output = torch.zeros_like(x_flat)
 
@@ -971,6 +977,18 @@ class MoEFFN(nn.Module):
         flat = top_indices.reshape(-1)
         counts = flat.bincount(minlength=self.num_routed_experts)
         self._token_counts[: counts.shape[0]] += counts[: self.num_routed_experts]
+
+    def _update_token_counts_from_counts(self, expert_counts: Tensor):
+        if not hasattr(self, "_token_counts"):
+            self.register_buffer(
+                "_token_counts",
+                torch.zeros(self.num_routed_experts, dtype=torch.long),
+                persistent=False,
+            )
+            self._token_counts = self._token_counts.to(expert_counts.device)
+        self._token_counts[: expert_counts.shape[0]] += expert_counts[
+            : self.num_routed_experts
+        ]
 
     def forward(self, x: Tensor, deep_embed=None, token_ids: Optional[Tensor] = None):
         if self.hash_routing or self.routing_strategy == "top_k":
