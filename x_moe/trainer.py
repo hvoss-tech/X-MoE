@@ -89,6 +89,11 @@ def build_model_from_config(
         aux_loss_free=model_config.get("aux_loss_free", False),
         bias_update_speed=model_config.get("bias_update_speed", 0.01),
         seq_balance_loss_weight=model_config.get("seq_balance_loss_weight", 0.0),
+        sqrt_softplus_routing=model_config.get("sqrt_softplus_routing", False),
+        hash_routing=model_config.get("hash_routing", False),
+        num_hash_functions=model_config.get("num_hash_functions", 4),
+        anticipatory_routing=model_config.get("anticipatory_routing", False),
+        swiglu_clamp_value=model_config.get("swiglu_clamp_value", 0.0),
     )
 
     return model

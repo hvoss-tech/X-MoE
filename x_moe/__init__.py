@@ -1,4 +1,4 @@
-from x_moe.moe import MoEFFN, TopKGate, ExpertChoiceGate
+from x_moe.moe import MoEFFN, TopKGate, ExpertChoiceGate, HashGate
 from x_moe.attention import (
     HCA,
     CSA,
@@ -37,6 +37,7 @@ __all__ = [
     "MoEFFN",
     "TopKGate",
     "ExpertChoiceGate",
+    "HashGate",
     "HCA",
     "CSA",
     "SharedKVMQA",

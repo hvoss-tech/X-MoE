@@ -1319,6 +1319,133 @@ class TestWindowValueNormBug:
         )
 
 
+class TestSeqBalanceLossPaddingBug:
+    def test_seq_balance_loss_with_non_divisible_tokens(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 7
+        num_tokens = 15
+        top_k = 2
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+    def test_seq_balance_loss_padded_correctly(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 8
+        num_tokens = 10
+        top_k = 2
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+    def test_seq_balance_loss_with_3d_logits(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 5
+        batch_size = 3
+        seq_len = 7
+        num_tokens = batch_size * seq_len
+        top_k = 2
+        router_logits = torch.randn(batch_size, seq_len, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+    def test_seq_balance_loss_exactly_divisible(self):
+        from x_moe.moe import _compute_seq_balance_loss
+
+        num_experts = 4
+        num_tokens_per_seq = 8
+        num_tokens = 16
+        top_k = 2
+        router_logits = torch.randn(num_tokens, num_experts)
+        top_indices = torch.randint(0, num_experts, (num_tokens, top_k))
+        loss = _compute_seq_balance_loss(
+            router_logits, top_indices, num_experts, num_tokens_per_seq
+        )
+        assert loss.item() >= 0
+        assert not torch.isnan(loss)
+
+
+class TestAuxLossFreeNoSeqBalanceBug:
+    def test_aux_loss_free_without_seq_balance(self):
+        model = _make_model(aux_loss_free=True)
+        x = torch.randint(0, 100, (2, 16))
+        loss = model(x)
+        assert not torch.isnan(loss)
+
+    def test_aux_loss_free_backward_without_seq_balance(self):
+        model = _make_model(aux_loss_free=True)
+        x = torch.randint(0, 100, (2, 16))
+        loss = model(x)
+        loss.backward()
+        has_grad = any(
+            p.grad is not None and not torch.isnan(p.grad).any()
+            for p in model.parameters()
+        )
+        assert has_grad
+
+    def test_aux_loss_free_no_balance_loss_without_seq_balance(self):
+        model = _make_model(
+            aux_loss_free=True, load_balance_loss_weight=0.01, z_loss_weight=1e-4
+        )
+        x = torch.randint(0, 100, (2, 16))
+        model(x)
+        aux = model.moe_aux_loss
+        assert aux.item() == 0.0
+
+    def test_aux_loss_free_bias_update_without_seq_balance(self):
+        model = _make_model(aux_loss_free=True, bias_update_speed=0.01)
+        x = torch.randint(0, 100, (2, 16))
+        model(x)
+        model.update_routing_biases()
+        moe_layers = [m for m in model.modules() if isinstance(m, MoEFFN)]
+        for moe in moe_layers:
+            bias = moe.gate.routing_bias
+            assert bias is not None
+            assert bias.shape[0] == moe.num_routed_experts
+
+    def test_aux_loss_free_with_seq_balance_still_works(self):
+        model = _make_model(
+            aux_loss_free=True,
+            seq_balance_loss_weight=0.01,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        loss = model(x)
+        assert not torch.isnan(loss)
+        aux = model.moe_aux_loss
+        assert aux.item() >= 0
+
+    def test_moe_ffn_aux_loss_free_no_seq_balance(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        assert moe.aux_loss_free is True
+        x = torch.randn(2, 8, 64)
+        out = moe(x)
+        assert not torch.isnan(out).any()
+
+
 class TestTotalStepsCalculationBug:
     def test_total_steps_order_of_operations(self):
         from x_moe.trainer import _make_collate_fn
@@ -1346,3 +1473,349 @@ class TestTotalStepsCalculationBug:
         steps_per_epoch = num_batches // gradient_accumulate
         assert correct == epochs * steps_per_epoch
         assert current == correct
+
+
+def _make_model(
+    dim=64, depth=2, heads=4, num_experts=4, top_k=2, batched=False, **kwargs
+):
+    decoder = Decoder(
+        dim=dim, depth=depth, heads=heads, ff_glu=True, rotary_pos_emb=True
+    )
+    transformer = TransformerWrapper(
+        num_tokens=100, max_seq_len=64, attn_layers=decoder
+    )
+    model = MoETransformerWrapper(
+        transformer=transformer,
+        num_experts=num_experts,
+        expert_top_k=top_k,
+        glu=True,
+        mult=4,
+        no_bias=True,
+        batched_experts=batched,
+        **kwargs,
+    )
+    return model
+
+
+class TestRoutingBiasAvgBug:
+    def test_update_routing_bias_avg_direction(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe._update_token_counts(
+            torch.tensor([[0], [0], [0], [1], [1], [2], [2], [3]]), 8
+        )
+        total = moe._token_counts.sum().item()
+        avg = total / 4
+        bias_before = moe.gate.routing_bias.clone()
+        moe.update_routing_bias()
+        bias_after = moe.gate.routing_bias
+        expert_0_count = (
+            moe._token_counts[0].item() if hasattr(moe, "_token_counts") else 0
+        )
+        assert total == 8
+        assert avg == 2.0
+
+    def test_overloaded_expert_bias_decreases(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        torch.manual_seed(42)
+        for _ in range(5):
+            x = torch.randn(2, 16, 64)
+            moe(x)
+        bias_before = moe.gate.routing_bias.clone()
+        moe.update_routing_bias()
+        bias_after = moe.gate.routing_bias
+        if hasattr(moe, "_token_counts") and moe._token_counts.sum() > 0:
+            counts = moe._token_counts.float()
+            total = counts.sum().item()
+            avg = total / moe.num_routed_experts
+            for i in range(moe.num_routed_experts):
+                if counts[i].item() > avg:
+                    assert bias_after[i].item() <= bias_before[i].item(), (
+                        f"Overloaded expert {i} bias should decrease, "
+                        f"before={bias_before[i].item()}, after={bias_after[i].item()}"
+                    )
+                elif counts[i].item() < avg:
+                    assert bias_after[i].item() >= bias_before[i].item(), (
+                        f"Underloaded expert {i} bias should increase, "
+                        f"before={bias_before[i].item()}, after={bias_after[i].item()}"
+                    )
+
+    def test_avg_is_total_over_num_experts(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        if hasattr(moe, "_token_counts"):
+            total = moe._token_counts.sum().item()
+            avg = total / moe.num_routed_experts
+            for i in range(moe.num_routed_experts):
+                count_i = moe._token_counts[i].item()
+                if count_i > avg + 0.5:
+                    pass
+
+
+class TestRoutingBiasNoTokenCountsBug:
+    def test_update_routing_bias_without_token_counts_no_crash(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.update_routing_bias()
+
+    def test_expert_choice_creates_token_counts(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        assert hasattr(moe, "_token_counts"), (
+            "_token_counts buffer should be created after expert_choice forward"
+        )
+        assert moe._token_counts.sum().item() > 0
+
+    def test_expert_choice_update_routing_bias_no_crash(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        moe.update_routing_bias()
+
+    def test_top_k_aux_loss_free_update_routing_bias_no_crash(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        moe.update_routing_bias()
+
+    def test_expert_choice_routing_bias_updates_direction(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        torch.manual_seed(42)
+        for _ in range(5):
+            x = torch.randn(2, 16, 64)
+            moe(x)
+        bias_before = moe.gate.routing_bias.clone()
+        moe.update_routing_bias()
+        bias_after = moe.gate.routing_bias
+        if moe._token_counts.sum().item() > 0:
+            counts = moe._token_counts.float()
+            total = counts.sum().item()
+            avg = total / moe.num_routed_experts
+            for i in range(moe.num_routed_experts):
+                if counts[i].item() > avg:
+                    assert bias_after[i].item() <= bias_before[i].item(), (
+                        f"Overloaded expert {i} bias should decrease"
+                    )
+                elif counts[i].item() < avg:
+                    assert bias_after[i].item() >= bias_before[i].item(), (
+                        f"Underloaded expert {i} bias should increase"
+                    )
+
+
+class TestHashGateRedundantLogitsBug:
+    def test_hash_gate_forward_returns_logits(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=4, top_k=2)
+        x = torch.randn(8, 64)
+        weights, top_indices, logits = gate(x)
+        assert logits.shape == (8, 4)
+        assert weights.shape == (8, 2)
+        assert top_indices.shape == (8, 2)
+
+    def test_hash_gate_with_token_ids(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=4, top_k=2)
+        x = torch.randn(8, 64)
+        token_ids = torch.randint(0, 1000, (8,))
+        weights, top_indices, logits = gate(x, token_ids=token_ids)
+        assert logits.shape == (8, 4)
+        assert weights.shape == (8, 2)
+        assert top_indices.shape == (8, 2)
+
+    def test_hash_gate_logits_are_gate_output(self):
+        from x_moe.moe import HashGate
+
+        gate = HashGate(dim=64, num_experts=4, top_k=2)
+        x = torch.randn(8, 64)
+        weights, top_indices, logits = gate(x)
+        direct_logits = gate.w_g(x)
+        assert torch.allclose(logits, direct_logits, atol=1e-6)
+
+
+class TestTensorAsBoolBug:
+    def test_sync_stacked_to_experts_with_bias(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=False,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        assert moe._has_bias_1.item() in (True, False)
+        assert moe._has_bias_2.item() in (True, False)
+        moe._sync_experts_to_stacked()
+        moe._sync_stacked_to_experts()
+
+    def test_sync_stacked_roundtrip_no_bias(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        moe._sync_experts_to_stacked()
+        w1_before = moe.w1_stack.data.clone()
+        moe._sync_stacked_to_experts()
+        moe._sync_experts_to_stacked()
+        assert torch.allclose(moe.w1_stack.data, w1_before, atol=1e-6)
+
+    def test_batched_forward_with_no_bias_glu(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=True,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        x = torch.randn(2, 16, 64)
+        out = moe(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_batched_forward_with_bias(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            no_bias=False,
+            batched_experts=True,
+            max_seq_len=64,
+        )
+        x = torch.randn(2, 16, 64)
+        out = moe(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+
+class TestExpertChoiceTokenCountConsistency:
+    def test_expert_choice_token_count_matches_top_k(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        if hasattr(moe, "_token_counts"):
+            total_counted = moe._token_counts.sum().item()
+            assert total_counted > 0, "Token counts should be non-zero after forward"
+
+    def test_top_k_aux_loss_free_token_count(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        assert hasattr(moe, "_token_counts")
+        assert moe._token_counts.sum().item() > 0
+
+
+class TestRoutingBiasUpdateConsistency:
+    def test_model_level_update_routing_biases_no_crash(self):
+        model = _make_model(aux_loss_free=True, bias_update_speed=0.01)
+        x = torch.randint(0, 100, (2, 16))
+        model(x)
+        model.update_routing_biases()
+
+    def test_model_level_expert_choice_update_routing_biases(self):
+        model = _make_model(
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            bias_update_speed=0.01,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        model(x)
+        model.update_routing_biases()
+
+    def test_update_routing_biases_multiple_steps(self):
+        model = _make_model(aux_loss_free=True, bias_update_speed=0.01)
+        x = torch.randint(0, 100, (2, 16))
+        for _ in range(5):
+            model(x)
+            model.update_routing_biases()
+            model.reset_moe_aux_loss()

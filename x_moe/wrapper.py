@@ -33,6 +33,11 @@ def replace_ffn_with_moe(
     aux_loss_free: bool = False,
     bias_update_speed: float = 0.01,
     seq_balance_loss_weight: float = 0.0,
+    sqrt_softplus_routing: bool = False,
+    hash_routing: bool = False,
+    num_hash_functions: int = 4,
+    anticipatory_routing: bool = False,
+    swiglu_clamp_value: float = 0.0,
 ) -> nn.Module:
     attn_layers = None
     if hasattr(model, "attn_layers"):
@@ -84,6 +89,11 @@ def replace_ffn_with_moe(
                 aux_loss_free=aux_loss_free,
                 bias_update_speed=bias_update_speed,
                 seq_balance_loss_weight=seq_balance_loss_weight,
+                sqrt_softplus_routing=sqrt_softplus_routing,
+                hash_routing=hash_routing,
+                num_hash_functions=num_hash_functions,
+                anticipatory_routing=anticipatory_routing,
+                swiglu_clamp_value=swiglu_clamp_value,
             )
             attn_layers.layers[idx][1] = moe
         ffn_count += 1
@@ -167,6 +177,11 @@ class MoETransformerWrapper(nn.Module):
         aux_loss_free: Deepseekv3 - Auxiliary-Loss-Free Load Balancing - only the seq balance loss is computed. IMPORTANT: Call model.update_routing_biases() after each optimizer step, so overloaded experts get bias decreased, underloaded get bias increased.
         bias_update_speed: Deepseekv3 - Speed of bias adjustments.
         seq_balance_loss_weight: Deepseekv3 - Weight of the sequence balance loss.
+        sqrt_softplus_routing: DeepSeekV4 - use sqrt(softplus(·)) for routing instead of softmax or sigmoid. Mutually exclusive with sigmoid_routing.
+        hash_routing: DeepSeekV4 - use hash-based deterministic routing by token ID. Replaces learned routing with a hash function for initial layers.
+        num_hash_functions: DeepSeekV4 - number of independent hash seeds for hash routing. Default: 4.
+        anticipatory_routing: DeepSeekV4 - use cached gate weights from the previous step for routing decisions during training. Call model.update_anticipatory_weights() after each optimizer step.
+        swiglu_clamp_value: DeepSeekV4 - clamp SwiGLU linear component to [-c, c] and gate component upper bound to c. 0 means disabled. Default: 0.0.
     """
 
     def __init__(
@@ -208,11 +223,25 @@ class MoETransformerWrapper(nn.Module):
         aux_loss_free: bool = False,
         bias_update_speed: float = 0.01,
         seq_balance_loss_weight: float = 0.0,
+        sqrt_softplus_routing: bool = False,
+        hash_routing: bool = False,
+        num_hash_functions: int = 4,
+        anticipatory_routing: bool = False,
+        swiglu_clamp_value: float = 0.0,
     ):
         super().__init__()
 
         assert routing_strategy in ("top_k", "expert_choice"), (
             f"routing_strategy must be 'top_k' or 'expert_choice', got '{routing_strategy}'"
+        )
+        assert not (sigmoid_routing and sqrt_softplus_routing), (
+            "sigmoid_routing and sqrt_softplus_routing are mutually exclusive"
+        )
+        assert num_hash_functions >= 1, (
+            f"num_hash_functions must be >= 1, got {num_hash_functions}"
+        )
+        assert swiglu_clamp_value >= 0, (
+            f"swiglu_clamp_value must be >= 0, got {swiglu_clamp_value}"
         )
         assert num_experts > 0, f"num_experts must be positive, got {num_experts}"
         assert 0 < expert_top_k <= num_experts, (
@@ -241,9 +270,6 @@ class MoETransformerWrapper(nn.Module):
                 f"expert_top_k*granularity_factor ({effective_top_k}) must be > "
                 f"num_shared_experts ({num_shared_experts})"
             )
-        if aux_loss_free:
-            assert seq_balance_loss_weight > 0, (f"if aux_loss_free is set, seq_balance_loss_weight must be > 0")
-
         if use_hca or use_csa:
             assert kv_dim > 0, f"kv_dim must be positive, got {kv_dim}"
             assert num_query_heads > 0, (
@@ -303,6 +329,11 @@ class MoETransformerWrapper(nn.Module):
             aux_loss_free=aux_loss_free,
             bias_update_speed=bias_update_speed,
             seq_balance_loss_weight=seq_balance_loss_weight,
+            sqrt_softplus_routing=sqrt_softplus_routing,
+            hash_routing=hash_routing,
+            num_hash_functions=num_hash_functions,
+            anticipatory_routing=anticipatory_routing,
+            swiglu_clamp_value=swiglu_clamp_value,
         )
 
         self.num_experts = num_experts
@@ -316,6 +347,11 @@ class MoETransformerWrapper(nn.Module):
         self.aux_loss_free = aux_loss_free
         self.bias_update_speed = bias_update_speed
         self.seq_balance_loss_weight = seq_balance_loss_weight
+        self.sqrt_softplus_routing = sqrt_softplus_routing
+        self.hash_routing = hash_routing
+        self.num_hash_functions = num_hash_functions
+        self.anticipatory_routing = anticipatory_routing
+        self.swiglu_clamp_value = swiglu_clamp_value
         self._gradient_checkpointing = False
 
         attn_layers = (
@@ -378,6 +414,11 @@ class MoETransformerWrapper(nn.Module):
             "aux_loss_free": aux_loss_free,
             "bias_update_speed": bias_update_speed,
             "seq_balance_loss_weight": seq_balance_loss_weight,
+            "sqrt_softplus_routing": sqrt_softplus_routing,
+            "hash_routing": hash_routing,
+            "num_hash_functions": num_hash_functions,
+            "anticipatory_routing": anticipatory_routing,
+            "swiglu_clamp_value": swiglu_clamp_value,
         }
 
         self.ds4_attention = None
@@ -442,6 +483,11 @@ class MoETransformerWrapper(nn.Module):
         for module in self.modules():
             if isinstance(module, MoEFFN):
                 module.update_routing_bias()
+
+    def update_anticipatory_weights(self):
+        for module in self.modules():
+            if isinstance(module, MoEFFN):
+                module.update_anticipatory_weights()
 
     def enable_gradient_checkpointing(self):
         self._gradient_checkpointing = True

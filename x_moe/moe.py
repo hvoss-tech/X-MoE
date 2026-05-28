@@ -17,27 +17,34 @@ class TopKGate(nn.Module):
         num_experts: int,
         top_k: int = 2,
         sigmoid_routing: bool = False,
+        sqrt_softplus_routing: bool = False,
     ):
         super().__init__()
+        assert not (sigmoid_routing and sqrt_softplus_routing), (
+            "sigmoid_routing and sqrt_softplus_routing are mutually exclusive"
+        )
         self.top_k = top_k
         self.num_experts = num_experts
         self.sigmoid_routing = sigmoid_routing
+        self.sqrt_softplus_routing = sqrt_softplus_routing
         self.w_g = nn.Linear(dim, num_experts, bias=False)
         self.register_buffer("routing_bias", torch.zeros(num_experts), persistent=True)
 
+    def _compute_scores(self, logits: Tensor) -> Tensor:
+        if self.sigmoid_routing:
+            return torch.sigmoid(logits)
+        elif self.sqrt_softplus_routing:
+            return torch.sqrt(F.softplus(logits))
+        else:
+            return F.softmax(logits, dim=-1)
+
     def forward(self, x: Tensor, apply_bias: bool = False):
         logits = self.w_g(x)
-        if self.sigmoid_routing:
-            raw_scores = torch.sigmoid(logits)
-        else:
-            raw_scores = F.softmax(logits, dim=-1)
+        raw_scores = self._compute_scores(logits)
 
         if apply_bias:
             biased_logits = logits + self.routing_bias.unsqueeze(0)
-            if self.sigmoid_routing:
-                biased_scores = torch.sigmoid(biased_logits)
-            else:
-                biased_scores = F.softmax(biased_logits, dim=-1)
+            biased_scores = self._compute_scores(biased_logits)
             top_k = min(self.top_k, self.num_experts)
             top_scores_biased, top_indices = biased_scores.topk(top_k, dim=-1)
             top_scores_raw = raw_scores.gather(-1, top_indices)
@@ -59,30 +66,37 @@ class ExpertChoiceGate(nn.Module):
         num_experts: int,
         capacity_factor: float = 1.0,
         sigmoid_routing: bool = False,
+        sqrt_softplus_routing: bool = False,
     ):
         super().__init__()
+        assert not (sigmoid_routing and sqrt_softplus_routing), (
+            "sigmoid_routing and sqrt_softplus_routing are mutually exclusive"
+        )
         self.num_experts = num_experts
         self.capacity_factor = capacity_factor
         self.sigmoid_routing = sigmoid_routing
+        self.sqrt_softplus_routing = sqrt_softplus_routing
         self.w_g = nn.Linear(dim, num_experts, bias=False)
         self.register_buffer("routing_bias", torch.zeros(num_experts), persistent=True)
 
+    def _compute_scores(self, logits: Tensor) -> Tensor:
+        if self.sigmoid_routing:
+            return torch.sigmoid(logits)
+        elif self.sqrt_softplus_routing:
+            return torch.sqrt(F.softplus(logits))
+        else:
+            return F.softmax(logits, dim=-1)
+
     def forward(self, x_flat: Tensor, num_tokens: int, apply_bias: bool = False):
         logits = self.w_g(x_flat)
-        if self.sigmoid_routing:
-            raw_scores = torch.sigmoid(logits)
-        else:
-            raw_scores = F.softmax(logits, dim=-1)
+        raw_scores = self._compute_scores(logits)
 
         capacity = max(1, int(self.capacity_factor * num_tokens / self.num_experts))
         capacity = min(capacity, num_tokens)
 
         if apply_bias:
             biased_logits = logits + self.routing_bias.unsqueeze(0)
-            if self.sigmoid_routing:
-                biased_scores = torch.sigmoid(biased_logits)
-            else:
-                biased_scores = F.softmax(biased_logits, dim=-1)
+            biased_scores = self._compute_scores(biased_logits)
             expert_scores = biased_scores.t()
             top_scores, top_indices = expert_scores.topk(capacity, dim=-1)
             return raw_scores, top_scores, top_indices, capacity, logits
@@ -90,6 +104,58 @@ class ExpertChoiceGate(nn.Module):
             expert_scores = raw_scores.t()
             top_scores, top_indices = expert_scores.topk(capacity, dim=-1)
             return raw_scores, top_scores, top_indices, capacity, logits
+
+
+class HashGate(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_experts: int,
+        top_k: int = 2,
+        num_hash_functions: int = 1,
+    ):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.num_hash_functions = num_hash_functions
+        self.w_g = nn.Linear(dim, num_experts, bias=False)
+        self.register_buffer("routing_bias", torch.zeros(num_experts), persistent=True)
+        self.register_buffer(
+            "hash_seeds",
+            torch.randint(0, 2**31, (num_hash_functions,)),
+            persistent=True,
+        )
+
+    def forward(
+        self, x: Tensor, token_ids: Optional[Tensor] = None, apply_bias: bool = False
+    ):
+        num_tokens = x.shape[0]
+        top_k = min(self.top_k, self.num_experts)
+
+        if token_ids is not None:
+            flat_ids = token_ids.reshape(-1)
+            top_indices = torch.empty(
+                num_tokens, top_k, dtype=torch.long, device=x.device
+            )
+            for k in range(top_k):
+                seed = self.hash_seeds[k % self.num_hash_functions].item()
+                hashed = (flat_ids * seed) % self.num_experts
+                top_indices[:, k] = hashed
+        else:
+            logits = self.w_g(x)
+            raw_scores = F.softmax(logits, dim=-1)
+            if apply_bias:
+                biased_logits = logits + self.routing_bias.unsqueeze(0)
+                biased_scores = F.softmax(biased_logits, dim=-1)
+                _, top_indices = biased_scores.topk(top_k, dim=-1)
+            else:
+                _, top_indices = raw_scores.topk(top_k, dim=-1)
+
+        weights = torch.ones(num_tokens, top_k, device=x.device) / top_k
+
+        logits = self.w_g(x)
+
+        return weights, top_indices, logits
 
 
 def _compute_load_balance_loss(
@@ -130,10 +196,7 @@ def _compute_seq_balance_loss(
     padded_tokens = num_seqs * num_tokens_per_seq
     if num_tokens < padded_tokens:
         one_hot = F.pad(one_hot, (0, 0, 0, padded_tokens - num_tokens))
-        router_probs_padded = F.pad(router_probs, (0, 0, 0, padded_tokens - num_tokens))
-    else:
-        one_hot_reshaped = one_hot[:padded_tokens]
-        router_probs_padded = router_probs[:padded_tokens]
+        router_probs = F.pad(router_probs, (0, 0, 0, padded_tokens - num_tokens))
     one_hot_reshaped = one_hot[:padded_tokens].reshape(
         num_seqs, num_tokens_per_seq, num_experts
     )
@@ -179,6 +242,11 @@ class MoEFFN(nn.Module):
         aux_loss_free: bool = False,
         bias_update_speed: float = 0.01,
         seq_balance_loss_weight: float = 0.0,
+        sqrt_softplus_routing: bool = False,
+        hash_routing: bool = False,
+        num_hash_functions: int = 4,
+        anticipatory_routing: bool = False,
+        swiglu_clamp_value: float = 0.0,
     ):
         super().__init__()
         self.dim = dim
@@ -197,6 +265,11 @@ class MoEFFN(nn.Module):
         self.aux_loss_free = aux_loss_free
         self.bias_update_speed = bias_update_speed
         self.seq_balance_loss_weight = seq_balance_loss_weight
+        self.sqrt_softplus_routing = sqrt_softplus_routing
+        self.hash_routing = hash_routing
+        self.num_hash_functions = num_hash_functions
+        self.anticipatory_routing = anticipatory_routing
+        self.swiglu_clamp_value = swiglu_clamp_value
 
         if granularity_factor < 1:
             raise ValueError(
@@ -262,12 +335,20 @@ class MoEFFN(nn.Module):
         else:
             self.shared_experts = None
 
-        if routing_strategy == "top_k":
+        if hash_routing:
+            self.gate = HashGate(
+                dim,
+                self.num_routed_experts,
+                top_k=routed_top_k,
+                num_hash_functions=num_hash_functions,
+            )
+        elif routing_strategy == "top_k":
             self.gate = TopKGate(
                 dim,
                 self.num_routed_experts,
                 top_k=routed_top_k,
                 sigmoid_routing=sigmoid_routing,
+                sqrt_softplus_routing=sqrt_softplus_routing,
             )
         elif routing_strategy == "expert_choice":
             self.gate = ExpertChoiceGate(
@@ -275,11 +356,12 @@ class MoEFFN(nn.Module):
                 self.num_routed_experts,
                 capacity_factor,
                 sigmoid_routing=sigmoid_routing,
+                sqrt_softplus_routing=sqrt_softplus_routing,
             )
         else:
             raise ValueError(
                 f"Unknown routing strategy: {routing_strategy}. "
-                f"Use 'top_k' or 'expert_choice'."
+                f"Use 'top_k', 'expert_choice', or enable 'hash_routing'."
             )
 
         self.register_buffer("_aux_loss", torch.tensor(0.0), persistent=False)
@@ -288,6 +370,16 @@ class MoEFFN(nn.Module):
         )
         self._compute_aux_loss = True
         self._use_gradient_checkpointing = False
+
+        if anticipatory_routing:
+            self.register_buffer(
+                "_cached_gate_weight",
+                self.gate.w_g.weight.data.clone(),
+                persistent=False,
+            )
+            self._anticipatory_initialized = True
+        else:
+            self._anticipatory_initialized = False
 
         if batched_experts:
             self._init_stacked_params()
@@ -361,7 +453,7 @@ class MoEFFN(nn.Module):
                 else:
                     ff_seq[0][0].weight.data.copy_(self.w1_stack.data[i])
                 ff_seq[2].weight.data.copy_(self.w2_stack.data[i])
-                if self._has_bias_1 and hasattr(self, "b1_stack"):
+                if self._has_bias_1.item() and hasattr(self, "b1_stack"):
                     if self._glu:
                         if ff_seq[0].proj.bias is not None:
                             ff_seq[0].proj.bias.data.copy_(self.b1_stack.data[i])
@@ -369,7 +461,7 @@ class MoEFFN(nn.Module):
                         if ff_seq[0][0].bias is not None:
                             ff_seq[0][0].bias.data.copy_(self.b1_stack.data[i])
                 if (
-                    self._has_bias_2
+                    self._has_bias_2.item()
                     and hasattr(self, "b2_stack")
                     and ff_seq[2].bias is not None
                 ):
@@ -384,7 +476,7 @@ class MoEFFN(nn.Module):
                 else:
                     self.w1_stack.data[i] = ff_seq[0][0].weight.data
                 self.w2_stack.data[i] = ff_seq[2].weight.data
-                if self._has_bias_1 and hasattr(self, "b1_stack"):
+                if self._has_bias_1.item() and hasattr(self, "b1_stack"):
                     if self._glu:
                         if ff_seq[0].proj.bias is not None:
                             self.b1_stack.data[i] = ff_seq[0].proj.bias.data
@@ -392,7 +484,7 @@ class MoEFFN(nn.Module):
                         if ff_seq[0][0].bias is not None:
                             self.b1_stack.data[i] = ff_seq[0][0].bias.data
                 if (
-                    self._has_bias_2
+                    self._has_bias_2.item()
                     and hasattr(self, "b2_stack")
                     and ff_seq[2].bias is not None
                 ):
@@ -435,12 +527,13 @@ class MoEFFN(nn.Module):
         bias = self.gate.routing_bias
         num_experts = self.num_routed_experts
         if hasattr(self, "_token_counts") and self._token_counts.sum() > 0:
-            avg = num_experts / self._token_counts.sum().clamp(min=1)
+            avg = self._token_counts.sum().float() / num_experts
             for i in range(num_experts):
                 if self._token_counts[i] > avg:
                     bias[i] = bias[i] - self.bias_update_speed
                 elif self._token_counts[i] < avg:
                     bias[i] = bias[i] + self.bias_update_speed
+            self._token_counts.zero_()
         else:
             ideal = 1.0 / num_experts
             for i in range(num_experts):
@@ -448,7 +541,27 @@ class MoEFFN(nn.Module):
                     bias[i] = bias[i] - self.bias_update_speed * 0.1
                 elif bias[i] < 0:
                     bias[i] = bias[i] + self.bias_update_speed * 0.1
-        self._token_counts.zero_()
+
+    @torch.no_grad()
+    def update_anticipatory_weights(self):
+        if not self.anticipatory_routing:
+            return
+        if hasattr(self, "_cached_gate_weight") and hasattr(self.gate, "w_g"):
+            self._cached_gate_weight.copy_(self.gate.w_g.weight.data)
+
+    def _get_gate_logits_with_anticipatory(self, x_flat: Tensor) -> Tensor:
+        if (
+            self.anticipatory_routing
+            and self._anticipatory_initialized
+            and hasattr(self, "_cached_gate_weight")
+            and self.training
+        ):
+            original_weight = self.gate.w_g.weight.data
+            self.gate.w_g.weight.data.copy_(self._cached_gate_weight)
+            logits = self.gate.w_g(x_flat)
+            self.gate.w_g.weight.data.copy_(original_weight)
+            return logits
+        return self.gate.w_g(x_flat)
 
     def _forward_shared_experts(self, x: Tensor) -> Tensor:
         if self.shared_experts is None:
@@ -458,13 +571,61 @@ class MoEFFN(nn.Module):
             output = output + expert(x)
         return output
 
-    def _forward_top_k_vectorized(self, x: Tensor, deep_embed=None):
+    def _forward_top_k_vectorized(
+        self, x: Tensor, deep_embed=None, token_ids: Optional[Tensor] = None
+    ):
         orig_shape = x.shape
         seq_len = orig_shape[1] if x.ndim > 1 else 0
         x_flat = x.reshape(-1, self.dim)
         num_tokens = x_flat.shape[0]
         apply_bias = self.aux_loss_free
-        weights, top_indices, router_logits = self.gate(x_flat, apply_bias=apply_bias)
+
+        if self.hash_routing:
+            weights, top_indices, router_logits = self.gate(
+                x_flat, token_ids=token_ids, apply_bias=apply_bias
+            )
+        elif (
+            self.anticipatory_routing
+            and self._anticipatory_initialized
+            and self.training
+        ):
+            if isinstance(self.gate, HashGate):
+                weights, top_indices, router_logits = self.gate(
+                    x_flat, token_ids=token_ids, apply_bias=apply_bias
+                )
+            else:
+                logits = self._get_gate_logits_with_anticipatory(x_flat)
+                if self.gate.sigmoid_routing:
+                    raw_scores = torch.sigmoid(logits)
+                elif self.gate.sqrt_softplus_routing:
+                    raw_scores = torch.sqrt(F.softplus(logits))
+                else:
+                    raw_scores = F.softmax(logits, dim=-1)
+                if apply_bias:
+                    biased_logits = logits + self.gate.routing_bias.unsqueeze(0)
+                    if self.gate.sigmoid_routing:
+                        biased_scores = torch.sigmoid(biased_logits)
+                    elif self.gate.sqrt_softplus_routing:
+                        biased_scores = torch.sqrt(F.softplus(biased_logits))
+                    else:
+                        biased_scores = F.softmax(biased_logits, dim=-1)
+                    top_k = min(self.gate.top_k, self.num_routed_experts)
+                    _, top_indices = biased_scores.topk(top_k, dim=-1)
+                    top_scores_raw = raw_scores.gather(-1, top_indices)
+                    weights = top_scores_raw / top_scores_raw.sum(
+                        dim=-1, keepdim=True
+                    ).clamp(min=1e-9)
+                else:
+                    top_k = min(self.gate.top_k, self.num_routed_experts)
+                    top_scores, top_indices = raw_scores.topk(top_k, dim=-1)
+                    weights = top_scores / top_scores.sum(dim=-1, keepdim=True).clamp(
+                        min=1e-9
+                    )
+                router_logits = self.gate.w_g(x_flat)
+        else:
+            weights, top_indices, router_logits = self.gate(
+                x_flat, apply_bias=apply_bias
+            )
         top_k = top_indices.shape[-1]
 
         if apply_bias:
@@ -556,20 +717,72 @@ class MoEFFN(nn.Module):
         self._accumulate_aux_loss(router_logits, top_indices, seq_len=seq_len)
         return output_flat.reshape(orig_shape)
 
-    def _forward_top_k(self, x: Tensor, deep_embed=None):
+    def _forward_top_k(
+        self, x: Tensor, deep_embed=None, token_ids: Optional[Tensor] = None
+    ):
         if deep_embed is not None:
-            return self._forward_top_k_fallback(x, deep_embed=deep_embed)
+            return self._forward_top_k_fallback(
+                x, deep_embed=deep_embed, token_ids=token_ids
+            )
         if self.batched_experts:
-            return self._forward_top_k_vectorized(x)
-        return self._forward_top_k_fallback(x)
+            return self._forward_top_k_vectorized(x, token_ids=token_ids)
+        return self._forward_top_k_fallback(x, token_ids=token_ids)
 
-    def _forward_top_k_fallback(self, x: Tensor, deep_embed=None):
+    def _forward_top_k_fallback(
+        self, x: Tensor, deep_embed=None, token_ids: Optional[Tensor] = None
+    ):
         orig_shape = x.shape
         seq_len = orig_shape[1] if x.ndim > 1 else 0
         x_flat = x.reshape(-1, self.dim)
         num_tokens = x_flat.shape[0]
         apply_bias = self.aux_loss_free
-        weights, top_indices, router_logits = self.gate(x_flat, apply_bias=apply_bias)
+
+        if self.hash_routing:
+            weights, top_indices, router_logits = self.gate(
+                x_flat, token_ids=token_ids, apply_bias=apply_bias
+            )
+        elif (
+            self.anticipatory_routing
+            and self._anticipatory_initialized
+            and self.training
+        ):
+            if isinstance(self.gate, HashGate):
+                weights, top_indices, router_logits = self.gate(
+                    x_flat, token_ids=token_ids, apply_bias=apply_bias
+                )
+            else:
+                logits = self._get_gate_logits_with_anticipatory(x_flat)
+                if self.gate.sigmoid_routing:
+                    raw_scores = torch.sigmoid(logits)
+                elif self.gate.sqrt_softplus_routing:
+                    raw_scores = torch.sqrt(F.softplus(logits))
+                else:
+                    raw_scores = F.softmax(logits, dim=-1)
+                if apply_bias:
+                    biased_logits = logits + self.gate.routing_bias.unsqueeze(0)
+                    if self.gate.sigmoid_routing:
+                        biased_scores = torch.sigmoid(biased_logits)
+                    elif self.gate.sqrt_softplus_routing:
+                        biased_scores = torch.sqrt(F.softplus(biased_logits))
+                    else:
+                        biased_scores = F.softmax(biased_logits, dim=-1)
+                    top_k = min(self.gate.top_k, self.num_routed_experts)
+                    _, top_indices = biased_scores.topk(top_k, dim=-1)
+                    top_scores_raw = raw_scores.gather(-1, top_indices)
+                    weights = top_scores_raw / top_scores_raw.sum(
+                        dim=-1, keepdim=True
+                    ).clamp(min=1e-9)
+                else:
+                    top_k = min(self.gate.top_k, self.num_routed_experts)
+                    top_scores, top_indices = raw_scores.topk(top_k, dim=-1)
+                    weights = top_scores / top_scores.sum(dim=-1, keepdim=True).clamp(
+                        min=1e-9
+                    )
+                router_logits = self.gate.w_g(x_flat)
+        else:
+            weights, top_indices, router_logits = self.gate(
+                x_flat, apply_bias=apply_bias
+            )
         top_k = top_indices.shape[-1]
 
         if apply_bias:
@@ -639,11 +852,14 @@ class MoEFFN(nn.Module):
             return out_all
 
         h1 = torch.einsum("esi,eoi->eso", padded_input, self.w1_stack)
-        if hasattr(self, "b1_stack") and self._has_bias_1:
+        if hasattr(self, "b1_stack") and self._has_bias_1.item():
             h1 = h1 + self.b1_stack.unsqueeze(1)
 
         if self._glu:
             h1, h1_gate = h1.chunk(2, dim=-1)
+            if self.swiglu_clamp_value > 0:
+                h1 = h1.clamp(min=-self.swiglu_clamp_value, max=self.swiglu_clamp_value)
+                h1_gate = h1_gate.clamp(max=self.swiglu_clamp_value)
             h1 = F.gelu(h1_gate) * h1
         else:
             h1 = F.gelu(h1)
@@ -652,7 +868,7 @@ class MoEFFN(nn.Module):
             h1 = F.dropout(h1, p=self._dropout_p, training=True)
 
         h2 = torch.einsum("esi,eoi->eso", h1, self.w2_stack)
-        if hasattr(self, "b2_stack") and self._has_bias_2:
+        if hasattr(self, "b2_stack") and self._has_bias_2.item():
             h2 = h2 + self.b2_stack.unsqueeze(1)
 
         h2 = h2 * pad_mask.unsqueeze(-1).float()
@@ -669,12 +885,10 @@ class MoEFFN(nn.Module):
         )
 
         if apply_bias:
-            for expert_idx in range(self.num_routed_experts):
-                selected = top_indices[expert_idx]
-                valid = selected[selected >= 0]
-                valid = valid[valid < num_tokens]
-                if hasattr(self, "_token_counts"):
-                    self._token_counts[expert_idx] += valid.numel()
+            all_selected = top_indices.reshape(-1)
+            valid_mask = (all_selected >= 0) & (all_selected < num_tokens)
+            valid_indices = all_selected[valid_mask]
+            self._update_token_counts(valid_indices.unsqueeze(-1), num_tokens)
 
         output = torch.zeros_like(x_flat)
 
@@ -758,9 +972,9 @@ class MoEFFN(nn.Module):
         counts = flat.bincount(minlength=self.num_routed_experts)
         self._token_counts[: counts.shape[0]] += counts[: self.num_routed_experts]
 
-    def forward(self, x: Tensor, deep_embed=None):
-        if self.routing_strategy == "top_k":
-            return self._forward_top_k(x, deep_embed=deep_embed)
+    def forward(self, x: Tensor, deep_embed=None, token_ids: Optional[Tensor] = None):
+        if self.hash_routing or self.routing_strategy == "top_k":
+            return self._forward_top_k(x, deep_embed=deep_embed, token_ids=token_ids)
         elif self.routing_strategy == "expert_choice":
             return self._forward_expert_choice_optimized(x, deep_embed=deep_embed)
         raise ValueError(f"Unknown routing strategy: {self.routing_strategy}")
