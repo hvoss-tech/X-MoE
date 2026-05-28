@@ -1,5 +1,5 @@
 [project]
-name = "easy-moe"
+name = "x-moe"
 version = "0.1.0"
 description = "Mixture of Experts wrapper around x-transformers for training SOTA MoE models"
 readme = "README.md"
@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [project.scripts]
-easy-moe-train = "train:main"
-easy-moe-generate = "generate:main"
+x-moe-train = "train:main"
+x-moe-generate = "generate:main"
 
 [build-system]
 requires = ["hatchling"]
