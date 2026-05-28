@@ -66,7 +66,7 @@ def main():
         batched_experts=True,
         max_batch_size=16,
         use_hca=True,
-        sigmoid_routing=True
+        sqrt_softplus_routing=True
     )
 
     print("5. Train with the Trainer")

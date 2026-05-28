@@ -138,7 +138,7 @@ class HashGate(nn.Module):
                 num_tokens, top_k, dtype=torch.long, device=x.device
             )
             for k in range(top_k):
-                seed = self.hash_seeds[k % self.num_hash_functions].item()
+                seed = self.hash_seeds[k % self.num_hash_functions]
                 h = (flat_ids ^ seed) * (seed | 1)
                 hashed = h % self.num_experts
                 top_indices[:, k] = hashed
@@ -394,6 +394,8 @@ class MoEFFN(nn.Module):
         proj_out_dim = self._routed_inner_dim * (2 if self._glu else 1)
         self.register_buffer("_has_bias_1", torch.tensor(False))
         self.register_buffer("_has_bias_2", torch.tensor(False))
+        self._has_bias_1_py = False
+        self._has_bias_2_py = False
 
         self.w1_stack = nn.Parameter(
             torch.empty(self.num_routed_experts, proj_out_dim, self.dim)
@@ -425,6 +427,7 @@ class MoEFFN(nn.Module):
                 torch.empty(self.num_routed_experts, proj_out_dim)
             )
             self._has_bias_1.fill_(True)
+            self._has_bias_1_py = True
             with torch.no_grad():
                 for i, expert in enumerate(self.routed_experts):
                     if self._glu:
@@ -436,6 +439,7 @@ class MoEFFN(nn.Module):
         if b2_exists:
             self.b2_stack = nn.Parameter(torch.empty(self.num_routed_experts, self.dim))
             self._has_bias_2.fill_(True)
+            self._has_bias_2_py = True
             with torch.no_grad():
                 for i, expert in enumerate(self.routed_experts):
                     if expert.ff[2].bias is not None:
@@ -455,7 +459,7 @@ class MoEFFN(nn.Module):
                 else:
                     ff_seq[0][0].weight.data.copy_(self.w1_stack.data[i])
                 ff_seq[2].weight.data.copy_(self.w2_stack.data[i])
-                if self._has_bias_1.item() and hasattr(self, "b1_stack"):
+                if self._has_bias_1_py and hasattr(self, "b1_stack"):
                     if self._glu:
                         if ff_seq[0].proj.bias is not None:
                             ff_seq[0].proj.bias.data.copy_(self.b1_stack.data[i])
@@ -463,7 +467,7 @@ class MoEFFN(nn.Module):
                         if ff_seq[0][0].bias is not None:
                             ff_seq[0][0].bias.data.copy_(self.b1_stack.data[i])
                 if (
-                    self._has_bias_2.item()
+                    self._has_bias_2_py
                     and hasattr(self, "b2_stack")
                     and ff_seq[2].bias is not None
                 ):
@@ -478,7 +482,7 @@ class MoEFFN(nn.Module):
                 else:
                     self.w1_stack.data[i] = ff_seq[0][0].weight.data
                 self.w2_stack.data[i] = ff_seq[2].weight.data
-                if self._has_bias_1.item() and hasattr(self, "b1_stack"):
+                if self._has_bias_1_py and hasattr(self, "b1_stack"):
                     if self._glu:
                         if ff_seq[0].proj.bias is not None:
                             self.b1_stack.data[i] = ff_seq[0].proj.bias.data
@@ -486,7 +490,7 @@ class MoEFFN(nn.Module):
                         if ff_seq[0][0].bias is not None:
                             self.b1_stack.data[i] = ff_seq[0][0].bias.data
                 if (
-                    self._has_bias_2.item()
+                    self._has_bias_2_py
                     and hasattr(self, "b2_stack")
                     and ff_seq[2].bias is not None
                 ):
@@ -648,7 +652,9 @@ class MoEFFN(nn.Module):
         sorted_weights = flat_weights[sort_idx]
 
         num_routed = self.num_routed_experts
-        expert_counts = flat_expert_ids.bincount(minlength=num_routed)
+        expert_counts = torch.zeros(num_routed, device=x.device, dtype=torch.long)
+        ones = torch.ones(flat_expert_ids.shape[0], device=x.device, dtype=torch.long)
+        expert_counts.scatter_add_(0, flat_expert_ids, ones)
         offsets = torch.zeros(num_routed + 1, device=x.device, dtype=torch.long)
         offsets[1:] = expert_counts.cumsum(0)
         local_positions = (
@@ -854,7 +860,7 @@ class MoEFFN(nn.Module):
             return out_all
 
         h1 = torch.einsum("esi,eoi->eso", padded_input, self.w1_stack)
-        if hasattr(self, "b1_stack") and self._has_bias_1.item():
+        if hasattr(self, "b1_stack") and self._has_bias_1_py:
             h1 = h1 + self.b1_stack.unsqueeze(1)
 
         if self._glu:
@@ -870,7 +876,7 @@ class MoEFFN(nn.Module):
             h1 = F.dropout(h1, p=self._dropout_p, training=True)
 
         h2 = torch.einsum("esi,eoi->eso", h1, self.w2_stack)
-        if hasattr(self, "b2_stack") and self._has_bias_2.item():
+        if hasattr(self, "b2_stack") and self._has_bias_2_py:
             h2 = h2 + self.b2_stack.unsqueeze(1)
 
         h2 = h2 * pad_mask.unsqueeze(-1).float()
@@ -893,7 +899,7 @@ class MoEFFN(nn.Module):
             for expert_idx in range(self.num_routed_experts):
                 selected = top_indices[expert_idx]
                 valid = (selected >= 0) & (selected < num_tokens)
-                expert_counts[expert_idx] = valid.sum().item()
+                expert_counts[expert_idx] = valid.sum()
             self._update_token_counts_from_counts(expert_counts)
 
         output = torch.zeros_like(x_flat)
@@ -975,7 +981,11 @@ class MoEFFN(nn.Module):
             )
             self._token_counts = self._token_counts.to(top_indices.device)
         flat = top_indices.reshape(-1)
-        counts = flat.bincount(minlength=self.num_routed_experts)
+        counts = torch.zeros(
+            self.num_routed_experts, device=top_indices.device, dtype=torch.long
+        )
+        ones = torch.ones(flat.shape[0], device=top_indices.device, dtype=torch.long)
+        counts.scatter_add_(0, flat, ones)
         self._token_counts[: counts.shape[0]] += counts[: self.num_routed_experts]
 
     def _update_token_counts_from_counts(self, expert_counts: Tensor):
