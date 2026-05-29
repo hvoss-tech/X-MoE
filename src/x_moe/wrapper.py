@@ -499,6 +499,11 @@ class MoETransformerWrapper(nn.Module):
         return count
 
     def forward(self, x, **kwargs):
+        # Note: ds4_attention (HCA/CSA) is an experimental block for compressed
+        # cross-sequence attention. It is created when use_hca/use_csa is True
+        # but is not yet integrated into the standard forward pass (requires
+        # embedding before the attention block, which happens inside the
+        # autoregressive wrapper).
         return self.autoregressive_wrapper(x, **kwargs)
 
     @torch.no_grad()

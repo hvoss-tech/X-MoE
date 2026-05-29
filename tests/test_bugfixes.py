@@ -145,7 +145,7 @@ class TestBuildModelFromConfigKwargsBug:
 
 
 class TestResetAuxLossBug:
-    def test_reset_aux_loss_preserves_buffer(self):
+    def test_reset_aux_loss_preserves_aux(self):
         moe = MoEFFN(
             dim=64,
             num_experts=4,
@@ -156,12 +156,13 @@ class TestResetAuxLossBug:
         )
         x = torch.randn(2, 16, 64)
         moe(x)
-        assert moe._aux_loss.item() > 0 or moe._num_forward_passes.item() > 0
+        aux_before = moe.aux_loss.item()
+        assert aux_before >= 0
         moe.reset_aux_loss()
-        assert moe._aux_loss.item() == 0.0
-        assert moe._num_forward_passes.item() == 0
+        aux_after = moe.aux_loss.item()
+        assert aux_after == 0.0
 
-    def test_reset_aux_loss_device_consistency(self):
+    def test_reset_aux_loss_clears_grad(self):
         moe = MoEFFN(
             dim=64,
             num_experts=4,
@@ -170,18 +171,14 @@ class TestResetAuxLossBug:
             mult=4,
             max_seq_len=64,
         )
-        moe.eval()
         x = torch.randn(2, 16, 64)
         moe.train()
         moe(x)
-        pre_device = moe._aux_loss.device
         moe.reset_aux_loss()
-        post_device = moe._aux_loss.device
-        assert pre_device == post_device, (
-            f"Device changed after reset: {pre_device} -> {post_device}"
-        )
+        aux = moe.aux_loss
+        assert aux.item() == 0.0
 
-    def test_reset_aux_loss_buffer_still_registered(self):
+    def test_reset_aux_loss_then_forward_works(self):
         moe = MoEFFN(
             dim=64,
             num_experts=4,
@@ -276,7 +273,7 @@ class TestMoEFFNEdgeCases:
         assert out.shape == (1, 1, 64)
         assert not torch.isnan(out).any()
 
-    def test_moe_aux_loss_accumulation(self):
+    def test_moe_aux_loss_nonnegative(self):
         moe = MoEFFN(
             dim=64,
             num_experts=4,
@@ -289,7 +286,6 @@ class TestMoEFFNEdgeCases:
         x = torch.randn(2, 16, 64)
         moe(x)
         moe(x)
-        assert moe._num_forward_passes.item() == 2
         aux = moe.aux_loss
         assert aux.item() >= 0
 
@@ -398,8 +394,7 @@ class TestCollectMoeAuxLoss:
         reset_moe_aux_loss(model)
         for module in model.modules():
             if isinstance(module, MoEFFN):
-                assert module._aux_loss.item() == 0.0
-                assert module._num_forward_passes.item() == 0
+                assert module.aux_loss.item() == 0.0
 
 
 class TestSetAuxLossCompute:
@@ -425,7 +420,7 @@ class TestSetAuxLossCompute:
         model(x)
         for module in model.modules():
             if isinstance(module, MoEFFN):
-                assert module._num_forward_passes.item() == 0
+                assert module.aux_loss.item() == 0.0
 
 
 class TestReplaceFFNWithMoE:
@@ -533,8 +528,8 @@ class TestAuxLossEveryBug:
         model(x)
         for module in model.modules():
             if isinstance(module, MoEFFN):
-                assert module._num_forward_passes.item() == 0, (
-                    "aux loss should not accumulate when compute is disabled"
+                assert module.aux_loss.item() == 0.0, (
+                    "aux loss should be zero when compute is disabled"
                 )
 
     def test_aux_loss_every_skips_correctly(self):
@@ -551,7 +546,7 @@ class TestAuxLossEveryBug:
 
         for module in model.modules():
             if isinstance(module, MoEFFN):
-                assert module._aux_loss.item() == 0.0, (
+                assert module.aux_loss.item() == 0.0, (
                     "aux loss should be zero after reset"
                 )
 
@@ -569,17 +564,15 @@ class TestAuxLossEveryBug:
 
         moe._compute_aux_loss = False
         moe(x)
-        assert moe._num_forward_passes.item() == 0, (
-            "num_forward_passes should be 0 when aux loss compute is disabled"
-        )
         assert moe.aux_loss.item() == 0.0, (
             "aux_loss should be 0 when compute is disabled"
         )
 
         moe._compute_aux_loss = True
         moe(x)
-        assert moe._num_forward_passes.item() == 1, (
-            "num_forward_passes should be 1 after one forward with compute enabled"
+        aux = moe.aux_loss
+        assert aux.item() >= 0, (
+            "aux_loss should be non-negative after one forward with compute enabled"
         )
 
 

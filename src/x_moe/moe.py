@@ -366,10 +366,7 @@ class MoEFFN(nn.Module):
                 f"Use 'top_k', 'expert_choice', or enable 'hash_routing'."
             )
 
-        self.register_buffer("_aux_loss", torch.tensor(0.0), persistent=False)
-        self.register_buffer(
-            "_num_forward_passes", torch.tensor(0, dtype=torch.long), persistent=False
-        )
+        self._stored_aux_loss = torch.tensor(0.0)
         self._compute_aux_loss = True
         self._use_gradient_checkpointing = False
 
@@ -498,33 +495,35 @@ class MoEFFN(nn.Module):
 
     @property
     def aux_loss(self):
-        if self._num_forward_passes.item() > 0:
-            return self._aux_loss / self._num_forward_passes.float()
-        return torch.tensor(0.0, device=self._aux_loss.device)
+        if self._stored_aux_loss is not None and self._stored_aux_loss.requires_grad:
+            return self._stored_aux_loss
+        if self._stored_aux_loss is not None:
+            return self._stored_aux_loss
+        return torch.tensor(0.0)
 
     def reset_aux_loss(self):
-        self._aux_loss.fill_(0.0)
-        self._num_forward_passes.fill_(0)
+        self._stored_aux_loss = torch.tensor(0.0)
 
     def _accumulate_aux_loss(self, router_logits, top_indices, seq_len: int = 0):
         if not self._compute_aux_loss:
+            self._stored_aux_loss = torch.tensor(0.0, device=router_logits.device)
             return
         if self.aux_loss_free:
             if self.seq_balance_loss_weight > 0 and seq_len > 0:
                 seq_loss = _compute_seq_balance_loss(
                     router_logits, top_indices, self.num_routed_experts, seq_len
                 )
-                aux = self.seq_balance_loss_weight * seq_loss
-                self._aux_loss.add_(aux.detach())
-                self._num_forward_passes.add_(1)
+                self._stored_aux_loss = self.seq_balance_loss_weight * seq_loss
+            else:
+                self._stored_aux_loss = torch.tensor(0.0, device=router_logits.device)
             return
         balance_loss = _compute_load_balance_loss(
             router_logits, top_indices, self.num_routed_experts
         )
         z_loss = _compute_z_loss(router_logits)
-        aux = self.load_balance_loss_weight * balance_loss + self.z_loss_weight * z_loss
-        self._aux_loss.add_(aux.detach())
-        self._num_forward_passes.add_(1)
+        self._stored_aux_loss = (
+            self.load_balance_loss_weight * balance_loss + self.z_loss_weight * z_loss
+        )
 
     @torch.no_grad()
     def update_routing_bias(self):
@@ -969,9 +968,7 @@ class MoEFFN(nn.Module):
                     self.num_routed_experts,
                     seq_len,
                 )
-                aux = self.seq_balance_loss_weight * seq_loss
-                self._aux_loss.add_(aux.detach())
-                self._num_forward_passes.add_(1)
+                self._stored_aux_loss = self.seq_balance_loss_weight * seq_loss
         elif self._compute_aux_loss:
             if router_logits.ndim == 3:
                 probs = F.softmax(
@@ -983,12 +980,10 @@ class MoEFFN(nn.Module):
             uniform = torch.full_like(avg_probs, 1.0 / self.num_routed_experts)
             balance_loss = (avg_probs - uniform).pow(2).sum() * self.num_routed_experts
             z_loss = _compute_z_loss(router_logits)
-            aux = (
+            self._stored_aux_loss = (
                 self.load_balance_loss_weight * balance_loss
                 + self.z_loss_weight * z_loss
             )
-            self._aux_loss.add_(aux.detach())
-            self._num_forward_passes.add_(1)
         return output.reshape(orig_shape)
 
     def _update_token_counts(self, top_indices: Tensor, num_tokens: int):

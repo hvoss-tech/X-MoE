@@ -15,8 +15,9 @@ from x_moe.data import TextDataset, train_tokenizer
 def main():
     print("1. Load data")
     ds = load_dataset("roneneldan/TinyStories")
-    train_texts = ds["train"]["text"]#[:10000]
+    train_texts = ds["train"]["text"][:10000]
     val_texts = ds["validation"]["text"][:10000]
+    print(len(train_texts), len(val_texts))
 
     print("2. Train or load a tokenizer")
     tokenizer = train_tokenizer(
@@ -64,7 +65,7 @@ def main():
         no_bias=True,
         zero_init_output=True,
         batched_experts=True,
-        max_batch_size=16,
+        max_batch_size=4,
         use_hca=True,
         sqrt_softplus_routing=True
     )
@@ -76,7 +77,7 @@ def main():
         train_dataset=train_ds,
         val_dataset=val_ds,
         epochs=10,
-        batch_size=16,
+        batch_size=4,
         gradient_accumulate=4,
         lr=3e-4,
         optimizer="muon",
