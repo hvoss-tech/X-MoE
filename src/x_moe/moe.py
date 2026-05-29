@@ -34,7 +34,7 @@ class TopKGate(nn.Module):
         if self.sigmoid_routing:
             return torch.sigmoid(logits)
         elif self.sqrt_softplus_routing:
-            return torch.sqrt(F.softplus(logits))
+            return torch.sqrt(F.softplus(logits).clamp(min=1e-6))
         else:
             return F.softmax(logits, dim=-1)
 
@@ -83,7 +83,7 @@ class ExpertChoiceGate(nn.Module):
         if self.sigmoid_routing:
             return torch.sigmoid(logits)
         elif self.sqrt_softplus_routing:
-            return torch.sqrt(F.softplus(logits))
+            return torch.sqrt(F.softplus(logits).clamp(min=1e-6))
         else:
             return F.softmax(logits, dim=-1)
 
@@ -603,7 +603,7 @@ class MoEFFN(nn.Module):
                 if self.gate.sigmoid_routing:
                     raw_scores = torch.sigmoid(logits)
                 elif self.gate.sqrt_softplus_routing:
-                    raw_scores = torch.sqrt(F.softplus(logits))
+                    raw_scores = torch.sqrt(F.softplus(logits).clamp(min=1e-6))
                 else:
                     raw_scores = F.softmax(logits, dim=-1)
                 if apply_bias:
@@ -611,7 +611,9 @@ class MoEFFN(nn.Module):
                     if self.gate.sigmoid_routing:
                         biased_scores = torch.sigmoid(biased_logits)
                     elif self.gate.sqrt_softplus_routing:
-                        biased_scores = torch.sqrt(F.softplus(biased_logits))
+                        biased_scores = torch.sqrt(
+                            F.softplus(biased_logits).clamp(min=1e-6)
+                        )
                     else:
                         biased_scores = F.softmax(biased_logits, dim=-1)
                     top_k = min(self.gate.top_k, self.num_routed_experts)
@@ -762,7 +764,7 @@ class MoEFFN(nn.Module):
                 if self.gate.sigmoid_routing:
                     raw_scores = torch.sigmoid(logits)
                 elif self.gate.sqrt_softplus_routing:
-                    raw_scores = torch.sqrt(F.softplus(logits))
+                    raw_scores = torch.sqrt(F.softplus(logits).clamp(min=1e-6))
                 else:
                     raw_scores = F.softmax(logits, dim=-1)
                 if apply_bias:
@@ -770,7 +772,9 @@ class MoEFFN(nn.Module):
                     if self.gate.sigmoid_routing:
                         biased_scores = torch.sigmoid(biased_logits)
                     elif self.gate.sqrt_softplus_routing:
-                        biased_scores = torch.sqrt(F.softplus(biased_logits))
+                        biased_scores = torch.sqrt(
+                            F.softplus(biased_logits).clamp(min=1e-6)
+                        )
                     else:
                         biased_scores = F.softmax(biased_logits, dim=-1)
                     top_k = min(self.gate.top_k, self.num_routed_experts)

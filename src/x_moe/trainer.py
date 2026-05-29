@@ -242,7 +242,7 @@ class Trainer:
         self.accelerator.print(f"Model parameters: {self.model.num_params:,}")
 
         if cfg.compile:
-            compile_dynamic = not cfg.pad_to_max
+            compile_dynamic = True
             self.accelerator.print(
                 f"Compiling model with torch.compile (dynamic={compile_dynamic})..."
             )
