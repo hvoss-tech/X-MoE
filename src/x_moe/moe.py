@@ -366,7 +366,7 @@ class MoEFFN(nn.Module):
                 f"Use 'top_k', 'expert_choice', or enable 'hash_routing'."
             )
 
-        self._stored_aux_loss = torch.tensor(0.0)
+        self._stored_aux_loss = None
         self._compute_aux_loss = True
         self._use_gradient_checkpointing = False
 
@@ -502,7 +502,10 @@ class MoEFFN(nn.Module):
         return torch.tensor(0.0)
 
     def reset_aux_loss(self):
-        self._stored_aux_loss = torch.tensor(0.0)
+        if self._stored_aux_loss is not None:
+            self._stored_aux_loss = self._stored_aux_loss.new_zeros(())
+        else:
+            self._stored_aux_loss = torch.tensor(0.0)
 
     def _accumulate_aux_loss(self, router_logits, top_indices, seq_len: int = 0):
         if not self._compute_aux_loss:

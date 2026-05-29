@@ -55,12 +55,12 @@ class AttentionSink(nn.Module):
         self.sink_logits = nn.Parameter(torch.full((num_heads,), -10.0))
 
     def forward(self, attn_logits: Tensor) -> Tensor:
-        sink_exp = torch.exp(self.sink_logits).view(1, self.num_heads, 1, 1)
-        attn_weights = F.softmax(attn_logits, dim=-1)
-        attn_weights = attn_weights / (
-            attn_weights.sum(dim=-1, keepdim=True) + sink_exp
+        sink = self.sink_logits.view(1, self.num_heads, 1, 1)
+        attn_logits_with_sink = torch.cat(
+            [attn_logits, sink.expand(*attn_logits.shape[:-1], 1)], dim=-1
         )
-        return attn_weights
+        attn_weights = F.softmax(attn_logits_with_sink, dim=-1)
+        return attn_weights[..., :-1]
 
 
 class SlidingWindowKV(nn.Module):

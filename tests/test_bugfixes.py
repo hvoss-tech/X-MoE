@@ -2456,3 +2456,140 @@ class TestPartialRotaryEmbeddingBug:
             use_partial_rope=False,
         )
         assert csa.rope is None
+
+
+class TestResetAuxLossDeviceBug:
+    def test_reset_aux_loss_preserves_device(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            max_seq_len=64,
+        )
+        moe._stored_aux_loss = torch.tensor(0.0, device="meta")
+        moe.reset_aux_loss()
+        assert moe._stored_aux_loss.device.type == "meta", (
+            f"reset_aux_loss should preserve device, got {moe._stored_aux_loss.device.type}"
+        )
+
+    def test_reset_aux_loss_preserves_device_after_forward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            max_seq_len=64,
+        )
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        old_device = moe._stored_aux_loss.device
+        moe.reset_aux_loss()
+        assert moe._stored_aux_loss.device == old_device, (
+            f"reset_aux_loss should preserve device after forward, "
+            f"expected {old_device}, got {moe._stored_aux_loss.device}"
+        )
+
+    def test_reset_aux_loss_with_none_fallback(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            max_seq_len=64,
+        )
+        moe._stored_aux_loss = None
+        moe.reset_aux_loss()
+        assert moe._stored_aux_loss is not None
+        assert moe._stored_aux_loss.item() == 0.0
+
+    def test_aux_loss_access_before_forward_returns_cpu_zero(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            glu=True,
+            mult=4,
+            max_seq_len=64,
+        )
+        aux = moe.aux_loss
+        assert aux.item() == 0.0
+
+
+class TestAttentionSinkCorrectness:
+    def test_attention_sink_weights_sum_to_one_with_sink(self):
+        from x_moe.attention import AttentionSink
+
+        sink = AttentionSink(num_heads=4)
+        attn_logits = torch.randn(1, 4, 8, 8)
+        attn_weights = sink(attn_logits)
+        weight_sum = attn_weights.sum(dim=-1)
+        assert (weight_sum <= 1.0 + 1e-6).all(), (
+            f"Returned weights should sum to <= 1.0, got max {weight_sum.max().item()}"
+        )
+        assert weight_sum.mean().item() > 0.9, (
+            f"At init, weights should sum close to 1.0, got {weight_sum.mean().item():.4f}"
+        )
+
+    def test_attention_sink_weights_vary_with_logits(self):
+        from x_moe.attention import AttentionSink
+
+        sink = AttentionSink(num_heads=4)
+        with torch.no_grad():
+            sink.sink_logits.fill_(0.0)
+
+        attn_logits_zero = torch.zeros(1, 4, 8, 8)
+        weights_zero = sink(attn_logits_zero)
+        sum_zero = weights_zero.sum(dim=-1)
+
+        attn_logits_large = torch.full((1, 4, 8, 8), 10.0)
+        weights_large = sink(attn_logits_large)
+        sum_large = weights_large.sum(dim=-1)
+
+        expected_zero = 8.0 / 9.0
+        assert torch.allclose(
+            sum_zero, torch.full_like(sum_zero, expected_zero), atol=1e-6
+        ), (
+            f"With zero logits and sink_logits=0, expected sum={expected_zero:.4f}, "
+            f"got {sum_zero.mean().item():.4f}"
+        )
+        assert sum_large.mean().item() > 0.99, (
+            f"With large logits, sum should be near 1.0, got {sum_large.mean().item():.4f}"
+        )
+        assert not torch.allclose(sum_zero, sum_large, atol=1e-4), (
+            "Sum should vary with logits, not be constant (old buggy behavior)"
+        )
+
+    def test_attention_sink_backward_works(self):
+        from x_moe.attention import AttentionSink
+
+        sink = AttentionSink(num_heads=4)
+        attn_logits = torch.randn(1, 4, 8, 8, requires_grad=True)
+        attn_weights = sink(attn_logits)
+        loss = attn_weights.sum()
+        loss.backward()
+        assert attn_logits.grad is not None
+        assert not torch.isnan(attn_logits.grad).any()
+        assert sink.sink_logits.grad is not None
+        assert not torch.isnan(sink.sink_logits.grad).any()
+
+    def test_hca_with_sink_forward_backward(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_attention_sink=True,
+        )
+        x = torch.randn(2, 16, 64, requires_grad=True)
+        out = hca(x)
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
