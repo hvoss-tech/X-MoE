@@ -515,7 +515,7 @@ class MoEFFN(nn.Module):
                     router_logits, top_indices, self.num_routed_experts, seq_len
                 )
                 aux = self.seq_balance_loss_weight * seq_loss
-                self._aux_loss = self._aux_loss + aux.detach()
+                self._aux_loss.add_(aux.detach())
                 self._num_forward_passes.add_(1)
             return
         balance_loss = _compute_load_balance_loss(
@@ -523,7 +523,7 @@ class MoEFFN(nn.Module):
         )
         z_loss = _compute_z_loss(router_logits)
         aux = self.load_balance_loss_weight * balance_loss + self.z_loss_weight * z_loss
-        self._aux_loss = self._aux_loss + aux.detach()
+        self._aux_loss.add_(aux.detach())
         self._num_forward_passes.add_(1)
 
     @torch.no_grad()
@@ -805,6 +805,9 @@ class MoEFFN(nn.Module):
             .reshape(-1)
         )
 
+        deep_embed_flat = (
+            deep_embed.reshape(-1, self.dim) if deep_embed is not None else None
+        )
         output = torch.zeros_like(x_flat)
         use_ckpt = getattr(self, "_use_gradient_checkpointing", False) and self.training
         capacity = self._capacity
@@ -818,16 +821,21 @@ class MoEFFN(nn.Module):
                 selected_tokens = selected_tokens[:capacity]
                 selected_weights = selected_weights[:capacity]
             expert_input = x_flat[selected_tokens]
+            expert_deep_embed = (
+                deep_embed_flat[selected_tokens]
+                if deep_embed_flat is not None
+                else None
+            )
             if use_ckpt:
                 expert_out = torch_checkpoint(
                     self.routed_experts[expert_idx],
                     expert_input,
-                    deep_embed,
+                    expert_deep_embed,
                     use_reentrant=False,
                 )
             else:
                 expert_out = self.routed_experts[expert_idx](
-                    expert_input, deep_embed=deep_embed
+                    expert_input, deep_embed=expert_deep_embed
                 )
             weighted_out = selected_weights * expert_out
             output.scatter_add_(
@@ -902,6 +910,9 @@ class MoEFFN(nn.Module):
                 expert_counts[expert_idx] = valid.sum()
             self._update_token_counts_from_counts(expert_counts)
 
+        deep_embed_flat = (
+            deep_embed.reshape(-1, self.dim) if deep_embed is not None else None
+        )
         output = torch.zeros_like(x_flat)
 
         use_ckpt = getattr(self, "_use_gradient_checkpointing", False) and self.training
@@ -914,16 +925,21 @@ class MoEFFN(nn.Module):
             if selected_indices.numel() == 0:
                 continue
             expert_input = x_flat[selected_indices]
+            expert_deep_embed = (
+                deep_embed_flat[selected_indices]
+                if deep_embed_flat is not None
+                else None
+            )
             if use_ckpt:
                 expert_out = torch_checkpoint(
                     self.routed_experts[expert_idx],
                     expert_input,
-                    deep_embed,
+                    expert_deep_embed,
                     use_reentrant=False,
                 )
             else:
                 expert_out = self.routed_experts[expert_idx](
-                    expert_input, deep_embed=deep_embed
+                    expert_input, deep_embed=expert_deep_embed
                 )
             expert_weights = top_scores[expert_idx][valid_mask].unsqueeze(-1)
             weighted_out = expert_weights * expert_out
@@ -940,18 +956,21 @@ class MoEFFN(nn.Module):
                 and self.seq_balance_loss_weight > 0
                 and seq_len > 0
             ):
+                expert_choice_top_indices = torch.zeros(
+                    num_tokens, 1, dtype=torch.long, device=x.device
+                )
+                for expert_idx in range(self.num_routed_experts):
+                    selected = top_indices[expert_idx]
+                    valid = (selected >= 0) & (selected < num_tokens)
+                    expert_choice_top_indices[selected[valid]] = expert_idx
                 seq_loss = _compute_seq_balance_loss(
                     router_logits,
-                    top_indices.reshape(-1)[: num_tokens * self.routed_top_k].reshape(
-                        num_tokens, self.routed_top_k
-                    )
-                    if top_indices.ndim > 1
-                    else top_indices[:num_tokens],
+                    expert_choice_top_indices,
                     self.num_routed_experts,
                     seq_len,
                 )
                 aux = self.seq_balance_loss_weight * seq_loss
-                self._aux_loss = self._aux_loss + aux.detach()
+                self._aux_loss.add_(aux.detach())
                 self._num_forward_passes.add_(1)
         elif self._compute_aux_loss:
             if router_logits.ndim == 3:
@@ -968,7 +987,7 @@ class MoEFFN(nn.Module):
                 self.load_balance_loss_weight * balance_loss
                 + self.z_loss_weight * z_loss
             )
-            self._aux_loss = self._aux_loss + aux.detach()
+            self._aux_loss.add_(aux.detach())
             self._num_forward_passes.add_(1)
         return output.reshape(orig_shape)
 

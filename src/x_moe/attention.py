@@ -125,6 +125,8 @@ class SharedKVMQA(nn.Module):
         win_k: Tensor | None = None,
         win_v: Tensor | None = None,
         sink: AttentionSink | None = None,
+        rope: PartialRotaryEmbedding | None = None,
+        rope_dim: int = 64,
     ) -> Tensor:
         b, n, _ = x.shape
         num_kv = compressed_kv.shape[1]
@@ -136,12 +138,26 @@ class SharedKVMQA(nn.Module):
         q = self.query_norm(q)
         kv = self.kv_norm(compressed_kv)
 
+        if rope is not None:
+            freqs_cos, freqs_sin = rope(n, device=x.device, dtype=x.dtype)
+            fc_q = freqs_cos.unsqueeze(0).unsqueeze(2)
+            fs_q = freqs_sin.unsqueeze(0).unsqueeze(2)
+            q = apply_partial_rope(q, fc_q, fs_q, rope_dim)
+            fc_kv = freqs_cos[:num_kv].unsqueeze(0)
+            fs_kv = freqs_sin[:num_kv].unsqueeze(0)
+            kv = apply_partial_rope(kv, fc_kv, fs_kv, rope_dim)
+
         keys = kv.unsqueeze(2).expand(-1, -1, self.num_query_heads, -1)
         values = keys.clone()
 
         if win_k is not None and win_v is not None:
             win_k_n = self.kv_norm(win_k)
             win_v_n = self.kv_norm(win_v)
+            if rope is not None:
+                win_len = win_k_n.shape[1]
+                fc_w = freqs_cos[:win_len].unsqueeze(0)
+                fs_w = freqs_sin[:win_len].unsqueeze(0)
+                win_k_n = apply_partial_rope(win_k_n, fc_w, fs_w, rope_dim)
             win_k_exp = win_k_n.unsqueeze(2).expand(-1, -1, self.num_query_heads, -1)
             win_v_exp = win_v_n.unsqueeze(2).expand(-1, -1, self.num_query_heads, -1)
             keys = torch.cat([keys, win_k_exp], dim=1)
@@ -221,6 +237,11 @@ class HCA(nn.Module):
         )
         self.sink = AttentionSink(num_query_heads) if use_attention_sink else None
 
+        if use_partial_rope:
+            self.rope = PartialRotaryEmbedding(kv_dim, rot_dim=self.rope_dim)
+        else:
+            self.rope = None
+
     def _compress_kv(self, x: Tensor) -> Tensor:
         b, n, _ = x.shape
         c = self.w_kv(x)
@@ -256,6 +277,8 @@ class HCA(nn.Module):
             win_k=win_k,
             win_v=win_v,
             sink=self.sink,
+            rope=self.rope,
+            rope_dim=self.rope_dim,
         )
 
         return out
@@ -310,6 +333,11 @@ class CSA(nn.Module):
             SlidingWindowKV(dim, window_size, kv_dim) if window_size > 0 else None
         )
         self.sink = AttentionSink(num_query_heads) if use_attention_sink else None
+
+        if use_partial_rope:
+            self.rope = PartialRotaryEmbedding(kv_dim, rot_dim=self.rope_dim)
+        else:
+            self.rope = None
 
     def _compress_kv_overlapped(self, x: Tensor) -> Tensor:
         b, n, _ = x.shape
@@ -380,6 +408,8 @@ class CSA(nn.Module):
             win_k=win_k,
             win_v=win_v,
             sink=self.sink,
+            rope=self.rope,
+            rope_dim=self.rope_dim,
         )
 
         return out
@@ -454,15 +484,15 @@ class HybridAttentionBlock(nn.Module):
     ):
         super().__init__()
         layers = []
-        self.config = None
+        self.config = {}
         if hca_config is not None:
             cfg = {"dim": dim, **hca_config}
             layers.append(DS4AttentionLayer(**cfg, attn_type="hca"))
-            self.config = cfg
+            self.config["hca"] = cfg
         if csa_config is not None:
             cfg = {"dim": dim, **csa_config}
             layers.append(DS4AttentionLayer(**cfg, attn_type="csa"))
-            self.config = cfg
+            self.config["csa"] = cfg
         self.layers = nn.ModuleList(layers)
         self.norm = RMSNorm(dim) if use_rmsnorm else nn.LayerNorm(dim)
 

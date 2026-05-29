@@ -2086,3 +2086,380 @@ class TestSeqBalanceLossTopKBug:
         )
         assert not torch.isnan(loss_k1)
         assert not torch.isnan(loss_k2)
+
+
+class TestExpertChoiceSeqBalanceLossBug:
+    def test_expert_choice_with_seq_balance_loss_no_crash(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            seq_balance_loss_weight=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 8, 64)
+        out = moe(x)
+        assert out.shape == (2, 8, 64)
+        assert not torch.isnan(out).any()
+
+    def test_expert_choice_seq_balance_loss_nonzero(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            seq_balance_loss_weight=0.1,
+        )
+        moe.train()
+        x = torch.randn(2, 16, 64)
+        moe(x)
+        aux = moe.aux_loss.item()
+        assert aux > 0, f"seq_balance_loss should be > 0 with aux_loss_free, got {aux}"
+
+    def test_expert_choice_seq_balance_backward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+            aux_loss_free=True,
+            seq_balance_loss_weight=0.01,
+        )
+        moe.train()
+        x = torch.randn(2, 8, 64)
+        out = moe(x)
+        loss = out.sum()
+        loss.backward()
+        grads = [p.grad for p in moe.parameters() if p.grad is not None]
+        assert len(grads) > 0
+        assert all(not torch.isnan(g).any() for g in grads)
+
+
+class TestDeepEmbedIndexingBug:
+    def test_deep_embed_top_k_fallback_forward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            batched_experts=False,
+            max_seq_len=8,
+            max_batch_size=1,
+        )
+        x = torch.randn(2, 4, 64)
+        deep_embed = torch.randn(2, 4, 64)
+        out = moe(x, deep_embed=deep_embed)
+        assert out.shape == (2, 4, 64)
+        assert not torch.isnan(out).any()
+
+    def test_deep_embed_expert_choice_forward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            routing_strategy="expert_choice",
+            capacity_factor=1.0,
+        )
+        x = torch.randn(2, 8, 64)
+        deep_embed = torch.randn(2, 8, 64)
+        out = moe(x, deep_embed=deep_embed)
+        assert out.shape == (2, 8, 64)
+        assert not torch.isnan(out).any()
+
+    def test_deep_embed_backward(self):
+        moe = MoEFFN(
+            dim=64,
+            num_experts=4,
+            expert_top_k=2,
+            batched_experts=False,
+            max_seq_len=8,
+            max_batch_size=1,
+        )
+        x = torch.randn(2, 4, 64, requires_grad=True)
+        deep_embed = torch.randn(2, 4, 64, requires_grad=True)
+        out = moe(x, deep_embed=deep_embed)
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert deep_embed.grad is not None
+        assert not torch.isnan(x.grad).any()
+        assert not torch.isnan(deep_embed.grad).any()
+
+
+class TestHybridAttentionBlockConfigBug:
+    def test_config_has_both_keys(self):
+        from x_moe.attention import HybridAttentionBlock
+
+        block = HybridAttentionBlock(
+            dim=64,
+            hca_config={"kv_dim": 32, "num_query_heads": 4, "compression_rate": 4},
+            csa_config={
+                "kv_dim": 32,
+                "num_query_heads": 4,
+                "compression_rate": 4,
+                "top_k_blocks": 8,
+            },
+        )
+        assert isinstance(block.config, dict)
+        assert "hca" in block.config
+        assert "csa" in block.config
+
+    def test_config_hca_only(self):
+        from x_moe.attention import HybridAttentionBlock
+
+        block = HybridAttentionBlock(
+            dim=64,
+            hca_config={"kv_dim": 32, "num_query_heads": 4, "compression_rate": 4},
+        )
+        assert "hca" in block.config
+        assert "csa" not in block.config
+
+    def test_config_csa_only(self):
+        from x_moe.attention import HybridAttentionBlock
+
+        block = HybridAttentionBlock(
+            dim=64,
+            csa_config={
+                "kv_dim": 32,
+                "num_query_heads": 4,
+                "compression_rate": 4,
+                "top_k_blocks": 8,
+            },
+        )
+        assert "csa" in block.config
+        assert "hca" not in block.config
+
+    def test_config_values_preserved(self):
+        from x_moe.attention import HybridAttentionBlock
+
+        block = HybridAttentionBlock(
+            dim=64,
+            hca_config={"kv_dim": 32, "num_query_heads": 4, "compression_rate": 4},
+            csa_config={
+                "kv_dim": 32,
+                "num_query_heads": 4,
+                "compression_rate": 4,
+                "top_k_blocks": 8,
+            },
+        )
+        assert block.config["hca"]["kv_dim"] == 32
+        assert block.config["csa"]["top_k_blocks"] == 8
+
+    def test_forward_with_both_configs(self):
+        from x_moe.attention import HybridAttentionBlock
+
+        block = HybridAttentionBlock(
+            dim=64,
+            hca_config={
+                "kv_dim": 32,
+                "num_query_heads": 4,
+                "compression_rate": 4,
+                "use_partial_rope": True,
+                "rope_dim": 16,
+            },
+            csa_config={
+                "kv_dim": 32,
+                "num_query_heads": 4,
+                "compression_rate": 4,
+                "top_k_blocks": 8,
+                "use_partial_rope": True,
+                "rope_dim": 16,
+            },
+        )
+        x = torch.randn(2, 16, 64)
+        out = block(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+
+class TestPartialRotaryEmbeddingBug:
+    def test_hca_with_partial_rope_forward(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        x = torch.randn(2, 16, 64)
+        out = hca(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_csa_with_partial_rope_forward(self):
+        from x_moe.attention import CSA
+
+        csa = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=8,
+            window_size=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        x = torch.randn(2, 16, 64)
+        out = csa(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_hca_partial_rope_backward(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        x = torch.randn(2, 16, 64, requires_grad=True)
+        out = hca(x)
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
+
+    def test_csa_partial_rope_backward(self):
+        from x_moe.attention import CSA
+
+        csa = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=8,
+            window_size=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        x = torch.randn(2, 16, 64, requires_grad=True)
+        out = csa(x)
+        loss = out.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert not torch.isnan(x.grad).any()
+
+    def test_partial_rope_different_from_no_rope(self):
+        from x_moe.attention import HCA
+
+        hca_rope = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_partial_rope=True,
+            rope_dim=16,
+            use_attention_sink=False,
+        )
+        hca_no_rope = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=0,
+            use_partial_rope=False,
+            use_attention_sink=False,
+        )
+        hca_no_rope.load_state_dict(hca_rope.state_dict(), strict=False)
+        x = torch.randn(2, 16, 64)
+        with torch.no_grad():
+            out_rope = hca_rope(x)
+            out_no_rope = hca_no_rope(x)
+        assert not torch.allclose(out_rope, out_no_rope, atol=1e-4), (
+            "Partial RoPE should produce different output than no RoPE"
+        )
+
+    def test_hca_rope_with_sliding_window(self):
+        from x_moe.attention import HCA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            window_size=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        x = torch.randn(2, 16, 64)
+        out = hca(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_csa_rope_with_sliding_window(self):
+        from x_moe.attention import CSA
+
+        csa = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=8,
+            window_size=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        x = torch.randn(2, 16, 64)
+        out = csa(x)
+        assert out.shape == (2, 16, 64)
+        assert not torch.isnan(out).any()
+
+    def test_rope_module_exists_when_enabled(self):
+        from x_moe.attention import HCA, CSA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        assert hca.rope is not None
+
+        csa = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=8,
+            use_partial_rope=True,
+            rope_dim=16,
+        )
+        assert csa.rope is not None
+
+    def test_rope_module_none_when_disabled(self):
+        from x_moe.attention import HCA, CSA
+
+        hca = HCA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            use_partial_rope=False,
+        )
+        assert hca.rope is None
+
+        csa = CSA(
+            dim=64,
+            kv_dim=32,
+            num_query_heads=4,
+            compression_rate=4,
+            top_k_blocks=8,
+            use_partial_rope=False,
+        )
+        assert csa.rope is None

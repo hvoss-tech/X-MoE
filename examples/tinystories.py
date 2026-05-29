@@ -15,7 +15,7 @@ from x_moe.data import TextDataset, train_tokenizer
 def main():
     print("1. Load data")
     ds = load_dataset("roneneldan/TinyStories")
-    train_texts = ds["train"]["text"][:10000]
+    train_texts = ds["train"]["text"]#[:10000]
     val_texts = ds["validation"]["text"][:10000]
 
     print("2. Train or load a tokenizer")
@@ -26,7 +26,7 @@ def main():
     )
 
     print("3. Create datasets (with caching to avoid re-tokenizing each epoch)")
-    train_ds = TextDataset(train_texts, tokenizer, max_seq_len=256, cache=True)
+    train_ds = TextDataset(train_texts, tokenizer, max_seq_len=256, cache=False)
     val_ds = TextDataset(val_texts, tokenizer, max_seq_len=256, cache=True)
 
     print("4. Build the model")

@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -9,7 +11,9 @@ from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tqdm import tqdm
 
 
-def train_tokenizer(texts, vocab_size=4096, save_path="tokenizer.json"):
+def train_tokenizer(texts, vocab_size=4096, save_path="tokenizer.json", force=False):
+    if save_path and not force and os.path.exists(save_path):
+        return Tokenizer.from_file(save_path)
     tokenizer = Tokenizer(BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = ByteLevel()
     tokenizer.decoder = ByteLevelDecoder()
